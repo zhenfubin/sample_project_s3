@@ -3,9 +3,36 @@
 SHT40 温湿度采集 + 继电器迟滞加热控制 + MQTT 远程管理的温控固件,
 具备完整安全保护(传感器故障锁、超温、加热超时、冷却、安全锁、重启循环保护)。
 
-- 详细设计:[docs/DESIGN.md](docs/DESIGN.md)
-- MQTT 协议:[docs/MQTT_PROTOCOL.md](docs/MQTT_PROTOCOL.md)
-- 任务完成报告(含测试报告与上板建议):[REPORT.md](REPORT.md)
+## 文档导航
+
+| 文档 | 内容 |
+|------|------|
+| [docs/DESIGN.md](docs/DESIGN.md) | 详细设计:架构分层、启动状态机、安全保护、任务结构、RGB 灯语 |
+| [docs/MQTT_PROTOCOL.md](docs/MQTT_PROTOCOL.md) | MQTT 协议:主题总表(唯一权威)、载荷格式、命令校验、事件语义 |
+| [docs/REPORT.md](docs/REPORT.md) | 测试与验证报告:主机测试、实机抓取、缺陷记录、遗留事项 |
+| [docs/specs/](docs/specs/) | 需求规范原文归档:任务书、RGB 灯语、事件机制、MQTT 主题配置 |
+
+## 本机设备标识与 MQTT 身份
+
+固件在 MQTT 上**没有单独的"设备名称"字段,身份统一为设备 ID(= MQTT client_id)**。
+
+| 标识 | 值 | 说明 |
+|------|----|------|
+| 设备 ID(device_id) | `s3-thermostat-83A2A0` | `<前缀>-<STA MAC 后 3 字节>`,每块板随 MAC 不同 |
+| MQTT client_id | `s3-thermostat-83A2A0` | 与设备 ID 相同,broker 侧以此识别本机 |
+| 主题命名空间 | `devices/s3-thermostat-83A2A0/` | 所有 MQTT 主题的本机前缀 |
+| SoftAP 配网名称 | `THERM-SETUP-XXXX` | 仅配网模式可见(XXXX = MAC 后 2 字节) |
+
+- 前缀 `s3-thermostat` 可在 `menuconfig → App Configuration → Device ID prefix` 修改;
+- 查询实际值:上电串口日志 `app_main: device_id=...` 一行,或订阅
+  `devices/+/discovery` 查看 retained 的 `device_id` 字段。
+
+### MQTT 主题
+
+本机 8 个主题(`{n}` = 传感器索引,当前为 `0`)的方向、QoS/Retained、载荷格式
+与命令语义以 [docs/MQTT_PROTOCOL.md](docs/MQTT_PROTOCOL.md) §1 为唯一权威。
+命令唯一入口 `devices/s3-thermostat-83A2A0/sensors/0/command`;
+设备级 `devices/{id}/command` **不订阅、不支持**,向其发布无任何效果。
 
 ## 默认硬件配置(menuconfig → App Configuration 可改)
 
@@ -45,13 +72,18 @@ SSID `THERM-SETUP-XXXX`(MAC 后 2 字节),密码 `setup-1234`,
 
 ## 主机单元测试(无需硬件)
 
+需 `pip install ziglang`;与固件同源编译 `ctrl_core` / `led_pattern` 三套测试:
+
 ```powershell
-python -m ziglang cc -std=c2x -Icomponents/ctrl_core/include -Itests/host `
+python -m ziglang cc -std=c2x -Wall -Wextra -Icomponents/ctrl_core/include -Itests/host `
   tests/host/test_ctrl_logic.c components/ctrl_core/ctrl_logic.c -o test_ctrl_logic.exe
-python -m ziglang cc -std=c2x -Icomponents/ctrl_core/include -Itests/host `
+python -m ziglang cc -std=c2x -Wall -Wextra -Icomponents/ctrl_core/include -Itests/host `
   -Imanaged_components/espressif__cjson/cJSON tests/host/test_ctrl_protocol.c `
   components/ctrl_core/ctrl_protocol.c components/ctrl_core/ctrl_logic.c `
   managed_components/espressif__cjson/cJSON/cJSON.c -o test_ctrl_protocol.exe -lm
-.\test_ctrl_logic.exe
-.\test_ctrl_protocol.exe
+python -m ziglang cc -std=c2x -Wall -Wextra -Icomponents/led_status/include -Itests/host `
+  tests/host/test_led_pattern.c components/led_status/led_pattern.c -o test_led_pattern.exe
+.\test_ctrl_logic.exe; .\test_ctrl_protocol.exe; .\test_led_pattern.exe
 ```
+
+测试结果与用例覆盖见 [docs/REPORT.md](docs/REPORT.md) §4.1。

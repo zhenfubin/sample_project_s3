@@ -78,7 +78,9 @@ GPIO4、高电平有效(用户确认),由 `menuconfig → App Configuration` 可
 - 采样周期 2 s(`sample_period_ms=2000`);
 - 高精度测量命令 `0xFD`,读 6 字节:温度 T、湿度 RH、各带 CRC-8(多项式 0x31);
 - CRC 失败或 I2C 超时(单次读 100 ms 上限)→ 本样本标记 `valid=false`;
-- 连续失败由控制层计入 `invalid_streak`;**无效样本绝不产生加热决策**。
+- 连续失败由控制层计入 `invalid_streak`;**无效样本绝不产生加热决策**;
+- 温度与湿度均上报遥测;无效样本也上报(`sensor_status":"fault"`,测量值 `null`),
+  载荷格式见 [MQTT_PROTOCOL](MQTT_PROTOCOL.md) §3。
 
 温度换算(数据手册公式):
 ```
@@ -196,23 +198,16 @@ Kconfig(`menuconfig → App Configuration`):`APP_RELAY_GPIO=4`、
 
 ## 11. 构建与测试
 
-- 目标芯片 ESP32-S3,IDF v6.1;`idf.py build`;
-- Flash 16MB(用户确认),**自定义分区表** `partitions.csv`:
-  `nvs` 24KB @0x9000 + `factory` 16320KB @0x10000(单应用大分区,app 空间约 16MB);
-  `sdkconfig.defaults` 固化了 flash 容量与分区表选择;
+- 目标芯片 ESP32-S3,IDF v6.1;构建/烧录命令见 [README](../README.md)「构建与烧录」;
+- Flash 16MB,自定义分区表 `partitions.csv`(nvs 24KB + factory 16320KB 单应用大分区),
+  布局速查见 README「分区布局」;`sdkconfig.defaults` 固化 flash 容量与分区表选择;
 - 依赖(`idf_component.yml`,Component Registry):`espressif/cjson`、`espressif/mqtt`
   (IDF v6.x 起二者不再随 IDF 树分发)、`espressif/led_strip` ^3.1.0
   (WS2812 驱动;2.5.x 在 IDF v6.1 编译失败,3.1.0 起修复,实装 3.1.1);
-- 主机单元测试:`tests/host/`,用 `zig cc`(`python -m ziglang cc`)编译
-  `ctrl_logic.c`/`ctrl_protocol.c`/`led_pattern.c` + cJSON 源码,零硬件依赖;
-- 测试覆盖:迟滞、阈值校验、传感器故障与恢复、样本过期、超温、手动模式、
-  手动过期、连续加热超时、SAFE_LOCKED、无样本不加热;
-  协议:载荷构建、主题索引提取、严格类型(bool/NaN/Inf/字符串)、
-  `start<stop`、`sensor` 与主题一致性、`heating`↔`relay_status` 一致性、
-  过期/时钟未同步规则、`no_action` 拒绝;
-  灯语:7 状态时序/颜色、优先级解析、三态初始值(见 §12)。
+- 主机单元测试(`tests/host/`,`zig cc` 同源编译 `ctrl_logic`/`ctrl_protocol`/`led_pattern` + cJSON):
+  命令见 [README](../README.md)「主机单元测试」,结果与用例覆盖见 [REPORT](REPORT.md) §4.1。
 
-## 12. RGB 状态灯(led_status,依《RGB 指示灯状态规范》V1.0)
+## 12. RGB 状态灯(led_status,依[《RGB 指示灯状态规范》V1.0](<specs/%23 ESP32-S3 温控设备 RGB 指示灯状态规范.md>))
 
 三层拆分,**只有 LED 任务触碰 LED 硬件**(规范 §6):
 

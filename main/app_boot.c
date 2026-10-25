@@ -8,17 +8,19 @@
 
 static const char *TAG = "app_boot";
 
+/* RTC 守护魔数 / 崩溃循环判定阈值 */
 #define RTC_GUARD_MAGIC   0x5AFE5AFEu
 #define BOOT_COUNT_LIMIT  5
 
+/* 重启守护数据(存 RTC 内存,复位/深睡后仍保留) */
 typedef struct {
-    uint32_t magic;
-    uint32_t boot_count;
-    uint32_t healthy_flag;
-    uint32_t lockout;
+    uint32_t magic;        /* RTC_GUARD_MAGIC = 数据有效 */
+    uint32_t boot_count;   /* 连续启动计数(崩溃循环检测) */
+    uint32_t healthy_flag; /* 非 0 = 本会话已稳定运行 5 分钟 */
+    uint32_t lockout;      /* 非 0 = 安全锁定生效 */
 } rtc_guard_t;
 
-RTC_DATA_ATTR static rtc_guard_t s_rtc;
+RTC_DATA_ATTR static rtc_guard_t s_rtc; /* RTC 慢速内存,跨复位保留 */
 static boot_state_t s_state = BOOT_STATE_SAFE;
 
 static const char *reset_reason_str(esp_reset_reason_t r)

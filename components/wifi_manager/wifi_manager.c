@@ -33,12 +33,12 @@ static const char *TAG = "wifi_manager";
  * Every association/IP change posts APP_EVENT notifications; the cap keeps
  * behaviour inside the event spec and its tests.
  */
-#define BACKOFF_MIN_MS 1000
-#define BACKOFF_MAX_MS 30000
+#define BACKOFF_MIN_MS 1000   /* 重连退避起始 1s */
+#define BACKOFF_MAX_MS 30000  /* 退避上限 30s(协议 §8) */
 
-#define PORTAL_SSID_PREFIX "THERM-SETUP-"
-#define PORTAL_PASS "setup-1234"
-#define PORTAL_BIND_PORT 80
+#define PORTAL_SSID_PREFIX "THERM-SETUP-" /* 配网热点名称前缀 */
+#define PORTAL_PASS "setup-1234"          /* 配网热点初始密码 */
+#define PORTAL_BIND_PORT 80               /* 配网页 HTTP 端口 */
 
 #define WIFI_TASK_STACK 4096
 #define WIFI_TASK_PRIO 9
@@ -50,12 +50,12 @@ typedef enum {
 } wifi_state_t;
 
 static EventGroupHandle_t s_wifi_events;
-static wifi_state_t s_state = WIFI_STATE_IDLE;
-static volatile bool s_associated = false;
-static volatile bool s_got_ip = false;
-static bool s_portal_active = false;
-static esp_netif_t *s_ap_netif = NULL;
-static httpd_handle_t s_httpd = NULL;
+static wifi_state_t s_state = WIFI_STATE_IDLE;  /* Wi-Fi 连接状态机 */
+static volatile bool s_associated = false;      /* 已关联 AP */
+static volatile bool s_got_ip = false;          /* 已获取 IP */
+static bool s_portal_active = false;            /* 配网热点已开启 */
+static esp_netif_t *s_ap_netif = NULL;          /* 配网 AP 网络接口 */
+static httpd_handle_t s_httpd = NULL;           /* 配网 HTTP 服务句柄 */
 static TaskHandle_t s_wifi_task = NULL;
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data);
@@ -63,6 +63,14 @@ static void wifi_task(void *arg);
 static void start_portal(void);
 static esp_err_t portal_get_handler(httpd_req_t *req);
 static esp_err_t portal_save_handler(httpd_req_t *req);
+
+/* 生成配网热点名称:THERM-SETUP-XXXX(XXXX = STA MAC 后两字节大写十六进制) */
+static void build_portal_name(char *out, size_t cap)
+{
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(out, cap, "%s%02X%02X", PORTAL_SSID_PREFIX, mac[4], mac[5]);
+}
 
 esp_err_t wifi_mgr_start(void)
 {
@@ -174,9 +182,7 @@ static void wifi_task(void *arg)
 {
     (void)arg;
     char portal_name[32];
-    uint8_t mac[6] = {0};
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(portal_name, sizeof(portal_name), "%s%02X%02X", PORTAL_SSID_PREFIX, mac[4], mac[5]);
+    build_portal_name(portal_name, sizeof(portal_name));
 
     wifi_mgr_creds_t creds = {0};
     uint8_t attempt = 0;
@@ -253,10 +259,9 @@ static void start_portal(void)
     }
     wifi_config_t cfg = {0};
 
-    uint8_t mac[6] = {0};
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf((char *)cfg.ap.ssid, sizeof(cfg.ap.ssid), "%s%02X%02X",
-             PORTAL_SSID_PREFIX, mac[4], mac[5]);
+    char portal_name[32];
+    build_portal_name(portal_name, sizeof(portal_name));
+    strlcpy((char *)cfg.ap.ssid, portal_name, sizeof(cfg.ap.ssid));
     cfg.ap.ssid_len = strlen((char *)cfg.ap.ssid);
     strlcpy((char *)cfg.ap.password, PORTAL_PASS, sizeof(cfg.ap.password));
     cfg.ap.max_connection = 4;

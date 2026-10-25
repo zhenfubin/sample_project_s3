@@ -10,10 +10,22 @@
 #include "nvs_flash.h"
 
 static const char *TAG = "app_cfg";
-static const char *NS = "app_cfg";
+static const char *NS = "app_cfg"; /* NVS 命名空间 */
 
-#define DEFAULT_START_C 35.0f
-#define DEFAULT_STOP_C  37.0f
+/* 默认阈值(摄氏度):启动 35 / 停止 37 / 软件超温上限 40 */
+#define DEFAULT_START_C    35.0f
+#define DEFAULT_STOP_C     37.0f
+#define DEFAULT_OVERTEMP_C 40.0f
+
+/* 阈值整体合法性(与 ctrl_core 规则一致):
+ * 有限值、量程内、start < stop、stop <= 软件超温上限 */
+static bool thresholds_valid(float start_c, float stop_c)
+{
+    return isfinite(start_c) && isfinite(stop_c) &&
+           start_c >= CTRL_LIMIT_MIN_C && start_c <= CTRL_LIMIT_MAX_C &&
+           stop_c >= CTRL_LIMIT_MIN_C && stop_c <= CTRL_LIMIT_MAX_C &&
+           (start_c < stop_c) && stop_c <= DEFAULT_OVERTEMP_C;
+}
 
 esp_err_t app_cfg_init(void)
 {
@@ -94,8 +106,8 @@ esp_err_t app_cfg_load(app_cfg_t *out)
         out->stop_c = f;
     }
 
-    /* Cross-field rule: start < stop, stop <= overtemp default. */
-    if (!(out->start_c < out->stop_c) || out->stop_c > 40.0f) {
+    /* 跨字段规则:统一走 thresholds_valid() 校验 */
+    if (!thresholds_valid(out->start_c, out->stop_c)) {
         ESP_LOGW(TAG, "stored thresholds invalid, reverting to defaults");
         out->start_c = DEFAULT_START_C;
         out->stop_c = DEFAULT_STOP_C;
@@ -145,10 +157,7 @@ esp_err_t app_cfg_save_wifi(const char *ssid, const char *pass)
 
 esp_err_t app_cfg_save_thresholds(float start_c, float stop_c)
 {
-    if (!isfinite(start_c) || !isfinite(stop_c) ||
-        start_c < CTRL_LIMIT_MIN_C || start_c > CTRL_LIMIT_MAX_C ||
-        stop_c < CTRL_LIMIT_MIN_C || stop_c > CTRL_LIMIT_MAX_C ||
-        !(start_c < stop_c) || stop_c > 40.0f) {
+    if (!thresholds_valid(start_c, stop_c)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -157,9 +166,7 @@ esp_err_t app_cfg_save_thresholds(float start_c, float stop_c)
     if (err != ESP_OK) {
         return err;
     }
-    if (err == ESP_OK) {
-        err = nvs_set_blob(h, "start_c", &start_c, sizeof(start_c));
-    }
+    err = nvs_set_blob(h, "start_c", &start_c, sizeof(start_c));
     if (err == ESP_OK) {
         err = nvs_set_blob(h, "stop_c", &stop_c, sizeof(stop_c));
     }

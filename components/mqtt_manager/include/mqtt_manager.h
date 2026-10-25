@@ -19,13 +19,16 @@
 #include <stddef.h>
 
 #include "esp_err.h"
+#include "event_manager.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define MQTT_TOPIC_MAX   160 /* per spec §12 */
-#define MQTT_PAYLOAD_MAX 512 /* inbound command payloads */
+/* 主题/载荷上限的唯一定义在 event_manager.h(协议 §12:160/512),
+ * 这里保留旧名作别名,保证事件载荷与发布缓冲尺寸永远一致 */
+#define MQTT_TOPIC_MAX   APP_EVENT_MQTT_TOPIC_MAX
+#define MQTT_PAYLOAD_MAX APP_EVENT_MQTT_PAYLOAD_MAX
 
 /**
  * @brief Create the client and tasks; does NOT connect.

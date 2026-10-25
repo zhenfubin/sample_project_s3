@@ -6,9 +6,9 @@ extern "C" {
 
 /* Tasks whose progress is monitored by the health/watchdog supervisor. */
 typedef enum {
-    APP_HEALTH_SENSOR = 0,
-    APP_HEALTH_CONTROL,
-    APP_HEALTH_NET,
+    APP_HEALTH_SENSOR = 0, /* 温湿度采样任务 */
+    APP_HEALTH_CONTROL,    /* 控制任务 */
+    APP_HEALTH_NET,        /* 网络/MQTT 任务 */
     APP_HEALTH_COUNT,
 } app_health_task_t;
 

@@ -9,7 +9,6 @@
 #include "temperature_control.h"
 
 #include <inttypes.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -34,25 +33,29 @@
 
 static const char *TAG = "temperature_control";
 
+/* 队列深度:采样 4 / 命令 4;命令去重缓存 16 条 */
 #define SAMPLE_QUEUE_LEN 4
 #define CMD_QUEUE_LEN    4
 #define CMD_ID_CACHE_LEN 16
 
+/* 采样队列消息:传感器任务 -> 控制任务 */
 typedef struct {
-    bool valid;
-    float celsius;
+    bool valid;     /* 本次采样是否有效(CRC/量程校验通过) */
+    float celsius;  /* 温度(摄氏度),valid=false 时无意义 */
+    float humidity; /* 湿度(%RH),valid=false 时无意义 */
 } sample_msg_t;
 
+/* 组件全局状态 */
 static struct {
-    temperature_control_cfg_t cfg;
-    ctrl_state_t st;
-    QueueHandle_t samples;
-    QueueHandle_t cmds;
-    char dev_id[32];
-    char topic_prefix[48]; /* "devices/<id>/" */
-    bool mqtt_was_connected;
-    char cmd_id_cache[CMD_ID_CACHE_LEN][48];
-    unsigned cmd_id_next;
+    temperature_control_cfg_t cfg;  /* 启动配置:设备 ID/阈值/安全锁 */
+    ctrl_state_t st;                /* 控制状态机(ctrl_core 纯 C,可主机测试) */
+    QueueHandle_t samples;          /* 采样队列(sample_msg_t) */
+    QueueHandle_t cmds;             /* 命令队列(app_event_mqtt_msg_t) */
+    char dev_id[32];                /* 设备 ID,如 s3-thermostat-xxxxxx */
+    char topic_prefix[48];          /* 本设备主题前缀 "devices/<id>/" */
+    bool mqtt_was_connected;        /* 上一轮 MQTT 连接标志(重连边沿检测) */
+    char cmd_id_cache[CMD_ID_CACHE_LEN][48]; /* 命令去重 cmd_id 环形缓存 */
+    unsigned cmd_id_next;           /* 去重缓存写入游标 */
 } s_app;
 
 static uint32_t now_ms(void)
@@ -60,25 +63,20 @@ static uint32_t now_ms(void)
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-static int make_topic(char *buf, size_t cap, const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(buf, cap, fmt, ap);
-    va_end(ap);
-    return (n < 0 || (size_t)n >= cap) ? -1 : n;
-}
+/* 主题拼装统一使用 mqtt_manager 的 mqtt_mgr_make_topic()(带截断检测) */
 
-static void publish_telemetry(void)
+static void publish_telemetry(const sample_msg_t *m)
 {
     char topic[MQTT_TOPIC_MAX];
     char payload[256];
-    if (make_topic(topic, sizeof(topic), "devices/%s/sensors/%d/telemetry", s_app.dev_id,
+    if (mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/sensors/%d/telemetry", s_app.dev_id,
                    s_app.cfg.sensor_index) < 0) {
         return;
     }
-    if (ctrl_payload_build(payload, sizeof(payload), s_app.cfg.sensor_index, s_app.st.celsius,
-                           s_app.st.heating, s_app.st.params.start_c, s_app.st.params.stop_c,
+    /* 每次采样均上报:含湿度与传感器状态;故障样本测量值为 null */
+    if (ctrl_payload_build(payload, sizeof(payload), s_app.cfg.sensor_index, m->celsius,
+                           m->humidity, m->valid, s_app.st.heating,
+                           s_app.st.params.start_c, s_app.st.params.stop_c,
                            ctrl_mode(&s_app.st) != CTRL_MODE_AUTO) < 0) {
         ESP_LOGE(TAG, "telemetry payload build failed (invalid values), not sent");
         return;
@@ -95,7 +93,7 @@ static void publish_state(const char *why)
     if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
         rssi = ap.rssi;
     }
-    make_topic(topic, sizeof(topic), "devices/%s/state", s_app.dev_id);
+    mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/state", s_app.dev_id);
     snprintf(payload, sizeof(payload),
              "{\"sensor\":%d,\"celsius\":%.2f,\"heating\":%s,\"relay_status\":\"%s\","
              "\"start\":%.2f,\"stop\":%.2f,\"mode\":\"%s\",\"protection\":\"%s\","
@@ -112,7 +110,7 @@ static void publish_config(void)
 {
     char topic[MQTT_TOPIC_MAX];
     char payload[256];
-    make_topic(topic, sizeof(topic), "devices/%s/config", s_app.dev_id);
+    mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/config", s_app.dev_id);
     snprintf(payload, sizeof(payload),
              "{\"sensor\":%d,\"start\":%.2f,\"stop\":%.2f,\"overtemp\":%.2f,"
              "\"sample_period_s\":%.1f,\"sensor_stale_s\":%.1f,\"manual_max_s\":%" PRIu32 "}",
@@ -129,11 +127,12 @@ static void publish_discovery(void)
 {
     char topic[MQTT_TOPIC_MAX];
     char payload[1024];
-    make_topic(topic, sizeof(topic), "devices/%s/discovery", s_app.dev_id);
+    mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/discovery", s_app.dev_id);
     snprintf(payload, sizeof(payload),
              "{\"device_id\":\"%s\",\"firmware\":\"%s\",\"platform\":\"esp32s3\","
              "\"sensors\":[{\"index\":%d,\"driver\":\"sht40\",\"unit\":\"celsius\","
-             "\"sample_period_s\":%.1f}],\"actuator\":{\"type\":\"relay\",\"gpio\":%d,"
+             "\"humidity_unit\":\"percent\",\"sample_period_s\":%.1f}],"
+             "\"actuator\":{\"type\":\"relay\",\"gpio\":%d,"
              "\"semantics\":\"commanded_state\"},"
              "\"topics\":{\"telemetry\":\"devices/%s/sensors/%d/telemetry\","
              "\"command\":\"devices/%s/sensors/%d/command\","
@@ -157,8 +156,8 @@ static void publish_cmd_result(const ctrl_cmd_t *cmd, const char *result, const 
     char topic[MQTT_TOPIC_MAX];
     char payload[256];
     int sensor = cmd ? cmd->sensor : s_app.cfg.sensor_index;
-    make_topic(topic, sizeof(topic), "devices/%s/sensors/%d/command_result", s_app.dev_id,
-               sensor);
+    mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/sensors/%d/command_result",
+                        s_app.dev_id, sensor);
     snprintf(payload, sizeof(payload),
              "{\"sensor\":%d,\"cmd_id\":\"%s\",\"type\":\"%s\",\"result\":\"%s\","
              "\"reason\":\"%s\",\"start\":%.2f,\"stop\":%.2f,\"mode\":\"%s\"}",
@@ -230,11 +229,13 @@ static void process_commands(uint32_t t)
             continue;
         }
         if (cmd_id_seen(cmd.cmd_id)) {
+            ESP_LOGI(TAG, "重复命令已跳过: cmd_id=%s", cmd.cmd_id);
             publish_cmd_result(&cmd, ctrl_cmd_result_str(CTRL_CMD_RES_DUPLICATE), "seen");
             continue;
         }
         /* Re-check expiry at apply time (queueing may have delayed us). */
         if (cmd.has_expires_at && device_time_synced() && cmd.expires_at <= device_time_unix()) {
+            ESP_LOGW(TAG, "命令已过期,拒绝执行: cmd_id=%s", cmd.cmd_id);
             publish_cmd_result(&cmd, ctrl_cmd_result_str(CTRL_CMD_RES_REJECTED), "expired");
             continue;
         }
@@ -243,6 +244,8 @@ static void process_commands(uint32_t t)
                                                            : CTRL_CMD_RES_APPLIED),
                            reason ? reason : "ok");
         if (reason == NULL) {
+            ESP_LOGI(TAG, "命令已执行: %s sensor=%d cmd_id=%s", ctrl_cmd_type_str(cmd.type),
+                     cmd.sensor, cmd.cmd_id);
             publish_state("command");
             publish_config();
         }
@@ -283,11 +286,18 @@ static void sensor_task(void *arg)
     for (;;) {
         float t = 0, rh = 0;
         esp_err_t err = sht40_read(&t, &rh);
-        sample_msg_t m = {.valid = (err == ESP_OK), .celsius = (err == ESP_OK) ? t : 0.0f};
+        bool valid = (err == ESP_OK);
+        /* 温度探测串口日志:每次采样输出温度/湿度与读取结果 */
+        if (valid) {
+            ESP_LOGI(TAG, "温湿度采样: 温度=%.2fC 湿度=%.1f%%", (double)t, (double)rh);
+        } else {
+            ESP_LOGW(TAG, "温湿度采样失败: %s (CRC/超时/超量程)", esp_err_to_name(err));
+        }
+        sample_msg_t m = {.valid = valid, .celsius = valid ? t : 0.0f,
+                          .humidity = valid ? rh : 0.0f};
         if (xQueueSend(s_app.samples, &m, 0) != pdTRUE) {
-            xQueueReceive(s_app.samples, &m, 0); /* drop oldest */
-            m.valid = (err == ESP_OK);
-            m.celsius = (err == ESP_OK) ? t : 0.0f;
+            sample_msg_t dump;
+            xQueueReceive(s_app.samples, &dump, 0); /* 队列满:丢弃最旧样本 */
             xQueueSend(s_app.samples, &m, 0);
         }
         app_health_note(APP_HEALTH_SENSOR);
@@ -309,9 +319,7 @@ static void control_task(void *arg)
         while (xQueueReceive(s_app.samples, &m, 0) == pdTRUE) {
             ctrl_on_sample(&s_app.st, m.valid, m.celsius, t);
             led_status_set_sensor_ok(m.valid);
-            if (m.valid) {
-                publish_telemetry();
-            }
+            publish_telemetry(&m); /* 每次采样均上报遥测(含湿度与传感器状态) */
         }
 
         process_commands(t);

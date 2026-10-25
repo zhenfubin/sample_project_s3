@@ -16,9 +16,9 @@ extern "C" {
  *    fault manager can latch a sensor fault
  */
 typedef struct {
-    uint8_t sda_gpio;
-    uint8_t scl_gpio;
-    uint32_t i2c_timeout_ms;
+    uint8_t sda_gpio;         /* I2C SDA 引脚 */
+    uint8_t scl_gpio;         /* I2C SCL 引脚 */
+    uint32_t i2c_timeout_ms;  /* 单次总线事务超时(毫秒) */
 } sht40_config_t;
 
 esp_err_t sht40_init(const sht40_config_t *cfg);

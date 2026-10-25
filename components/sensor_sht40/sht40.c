@@ -1,22 +1,27 @@
 #include "sht40.h"
 
+#include <inttypes.h>
 #include <string.h>
 
 #include "driver/i2c_master.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+static const char *TAG = "sht40";
+
+/* SHT40 器件参数:I2C 地址 / 单次测量命令(高精度)/ 测量等待时间 / 量程 */
 #define SHT40_ADDR          0x44
-#define SHT40_CMD_MEASURE_H 0xFD /* single shot, high repeatability */
-#define SHT40_MEASURE_WAIT_MS 10
-#define SHT40_TEMP_MIN      (-40.0f)
-#define SHT40_TEMP_MAX      (125.0f)
+#define SHT40_CMD_MEASURE_H 0xFD /* 单次测量,高重复精度模式 */
+#define SHT40_MEASURE_WAIT_MS 10 /* 发命令后等待转换完成 */
+#define SHT40_TEMP_MIN      (-40.0f) /* 数据手册温度下限 */
+#define SHT40_TEMP_MAX      (125.0f) /* 数据手册温度上限 */
 
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_dev;
-static int64_t s_last_ok_us;
-static uint32_t s_failures;
+static int64_t s_last_ok_us; /* 最近一次有效采样的时间戳(微秒) */
+static uint32_t s_failures;  /* 连续失败计数(故障管理用) */
 
 static uint8_t crc8(const uint8_t *data, size_t len)
 {
@@ -61,6 +66,8 @@ esp_err_t sht40_init(const sht40_config_t *cfg)
         return err;
     }
     s_failures = 0;
+    ESP_LOGI(TAG, "SHT40 已初始化: SDA=%d SCL=%d addr=0x%02X", cfg->sda_gpio, cfg->scl_gpio,
+             SHT40_ADDR);
     return ESP_OK;
 }
 
@@ -86,6 +93,8 @@ esp_err_t sht40_read(float *temperature_c, float *humidity_rh)
     esp_err_t err = i2c_master_transmit(s_dev, &cmd, 1, 100);
     if (err != ESP_OK) {
         s_failures++;
+        ESP_LOGW(TAG, "测量命令发送失败(连续失败 %" PRIu32 " 次): %s", s_failures,
+                 esp_err_to_name(err));
         return err;
     }
 
@@ -96,11 +105,14 @@ esp_err_t sht40_read(float *temperature_c, float *humidity_rh)
     err = i2c_master_receive(s_dev, raw, sizeof(raw), 100);
     if (err != ESP_OK) {
         s_failures++;
+        ESP_LOGW(TAG, "测量数据读取失败(连续失败 %" PRIu32 " 次): %s", s_failures,
+                 esp_err_to_name(err));
         return err;
     }
 
     if (crc8(&raw[0], 2) != raw[2] || crc8(&raw[3], 2) != raw[5]) {
         s_failures++;
+        ESP_LOGW(TAG, "CRC 校验失败(连续失败 %" PRIu32 " 次),本次采样丢弃", s_failures);
         return ESP_ERR_INVALID_CRC;
     }
 
@@ -117,6 +129,7 @@ esp_err_t sht40_read(float *temperature_c, float *humidity_rh)
 
     if (!(t >= SHT40_TEMP_MIN && t <= SHT40_TEMP_MAX)) {
         s_failures++;
+        ESP_LOGW(TAG, "温度超量程(连续失败 %" PRIu32 " 次): T=%.2fC", s_failures, (double)t);
         return ESP_ERR_INVALID_RESPONSE;
     }
 

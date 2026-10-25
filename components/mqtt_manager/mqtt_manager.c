@@ -32,25 +32,25 @@ static const char *TAG = "mqtt_manager";
 #define BACKOFF_MIN_MS   1000
 #define BACKOFF_MAX_MS   30000 /* spec §8: cap 30 s */
 
+/* 单条待发布消息(经有界队列由 pub_task 统一发送) */
 typedef struct {
-    char topic[MQTT_TOPIC_MAX];
-    char payload[PUB_PAYLOAD_MAX];
-    int qos;
-    bool retain;
+    char topic[MQTT_TOPIC_MAX];     /* 目的主题 */
+    char payload[PUB_PAYLOAD_MAX];  /* 载荷(JSON 文本) */
+    int qos;                        /* 0/1 */
+    bool retain;                    /* 保留标志 */
 } pub_msg_t;
 
-static esp_mqtt_client_handle_t s_client;
-static QueueHandle_t s_pub_queue;
-static TaskHandle_t s_supervisor;
-static volatile bool s_connected;
+static esp_mqtt_client_handle_t s_client;   /* esp-mqtt 客户端句柄 */
+static QueueHandle_t s_pub_queue;           /* 发布有界队列(仅 pub_task 出队) */
+static TaskHandle_t s_supervisor;           /* 重连主管任务(唯一重连发起者) */
+static volatile bool s_connected;           /* MQTT 会话已建立 */
 static volatile bool s_session_up; /* an established session was dropped */
-static volatile bool s_started;
-static volatile bool s_net_ready;
-static volatile bool s_sup_reset;
-static char s_device_id[32];
-static char s_avail_topic[MQTT_TOPIC_MAX];
-static char s_cmd_topic[MQTT_TOPIC_MAX];
-static char s_cmd_topic_lvl[MQTT_TOPIC_MAX];
+static volatile bool s_started;             /* esp-mqtt 客户端已 start */
+static volatile bool s_net_ready;           /* Wi-Fi 已获 IP,允许连接 */
+static volatile bool s_sup_reset;           /* 复位重连退避计数 */
+static char s_device_id[32];                /* 设备 ID */
+static char s_avail_topic[MQTT_TOPIC_MAX];  /* 遗嘱/在线主题 devices/{id}/availability */
+static char s_cmd_topic[MQTT_TOPIC_MAX];     /* 命令主题 devices/{id}/sensors/0/command(唯一命令入口) */
 
 static void supervisor_task(void *arg);
 static void pub_task(void *arg);
@@ -78,8 +78,11 @@ static void handle_mqtt_event(void *arg, esp_event_base_t base, int32_t event_id
         ESP_LOGI(TAG, "connected to broker");
         /* Safe here: the client's own event context, recursive API lock. */
         esp_mqtt_client_publish(s_client, s_avail_topic, "online", 0, 1, 1);
+        /* 仅订阅传感器命令主题(索引 0 精确主题,不用通配符);
+         * 设备级 command 不支持,不订阅以防客户端误用 */
         esp_mqtt_client_subscribe(s_client, s_cmd_topic, 1);
-        esp_mqtt_client_subscribe(s_client, s_cmd_topic_lvl, 1);
+        /* MQTT 订阅串口日志 */
+        ESP_LOGI(TAG, "已订阅MQTT主题: %s", s_cmd_topic);
         event_manager_publish(APP_EVENT_MQTT_CONNECTED, TAG, 0, NULL, 0);
         if (s_supervisor) {
             xTaskNotifyGive(s_supervisor);
@@ -110,6 +113,9 @@ static void handle_mqtt_event(void *arg, esp_event_base_t base, int32_t event_id
         msg.payload[dlen] = '\0';
         msg.len = dlen;
         msg.retained = ev->retain;
+        /* MQTT 收包串口日志:主题 + 载荷截断预览(最多 160 字符) */
+        ESP_LOGI(TAG, "收到MQTT消息: topic=%s len=%d retain=%d payload=%.160s", msg.topic,
+                 ev->data_len, (int)ev->retain, msg.payload);
         event_manager_publish(APP_EVENT_MQTT_MESSAGE, TAG, 0, &msg, sizeof(msg));
         break;
     }
@@ -146,10 +152,8 @@ esp_err_t mqtt_manager_init(const char *uri, const char *device_id)
     snprintf(s_device_id, sizeof(s_device_id), "%s", device_id);
     if (mqtt_mgr_make_topic(s_avail_topic, sizeof(s_avail_topic), "devices/%s/availability",
                             s_device_id) < 0 ||
-        mqtt_mgr_make_topic(s_cmd_topic, sizeof(s_cmd_topic), "devices/%s/command",
-                            s_device_id) < 0 ||
-        mqtt_mgr_make_topic(s_cmd_topic_lvl, sizeof(s_cmd_topic_lvl),
-                            "devices/%s/sensors/+/command", s_device_id) < 0) {
+        mqtt_mgr_make_topic(s_cmd_topic, sizeof(s_cmd_topic),
+                            "devices/%s/sensors/0/command", s_device_id) < 0) {
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -286,6 +290,10 @@ static void pub_task(void *arg)
                                          (int)strlen(msg.payload), msg.qos, msg.retain, true);
         if (rc < 0) {
             ESP_LOGW(TAG, "enqueue failed (%d): %s", rc, msg.topic);
+        } else {
+            /* MQTT 发包串口日志:主题 + 载荷截断预览(最多 160 字符) */
+            ESP_LOGI(TAG, "发送MQTT消息: topic=%s qos=%d retain=%d payload=%.160s", msg.topic,
+                     msg.qos, (int)msg.retain, msg.payload);
         }
     }
 }

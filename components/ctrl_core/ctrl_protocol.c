@@ -45,8 +45,8 @@ static bool json_int_in(const cJSON *o, const char *key, long lo, long hi, long 
     return true;
 }
 
-int ctrl_payload_build(char *buf, size_t cap, int sensor, float celsius, bool heating,
-                       float start_c, float stop_c, bool manual)
+int ctrl_payload_build(char *buf, size_t cap, int sensor, float celsius, float humidity_rh,
+                       bool sensor_ok, bool heating, float start_c, float stop_c, bool manual)
 {
     if (buf == NULL || cap == 0) {
         return -1;
@@ -54,17 +54,39 @@ int ctrl_payload_build(char *buf, size_t cap, int sensor, float celsius, bool he
     if (sensor < 0 || sensor > 31) {
         return -1;
     }
-    if (!isfinite(celsius) || !isfinite(start_c) || !isfinite(stop_c)) {
+    if (!isfinite(start_c) || !isfinite(stop_c)) {
         return -1;
     }
-    if (celsius < CTRL_LIMIT_MIN_C || celsius > CTRL_LIMIT_MAX_C) {
-        return -1;
+    /* 仅有效样本校验测量值;故障样本测量值不参与校验(输出 null) */
+    if (sensor_ok) {
+        if (!isfinite(celsius) || !isfinite(humidity_rh)) {
+            return -1;
+        }
+        if (celsius < CTRL_LIMIT_MIN_C || celsius > CTRL_LIMIT_MAX_C) {
+            return -1;
+        }
+        if (humidity_rh < CTRL_LIMIT_MIN_RH || humidity_rh > CTRL_LIMIT_MAX_RH) {
+            return -1;
+        }
     }
+
+    /* 故障样本不携带测量值:输出 null 而非伪造数字 */
+    char celsius_str[16];
+    char humidity_str[16];
+    if (sensor_ok) {
+        snprintf(celsius_str, sizeof(celsius_str), "%.2f", (double)celsius);
+        snprintf(humidity_str, sizeof(humidity_str), "%.2f", (double)humidity_rh);
+    } else {
+        snprintf(celsius_str, sizeof(celsius_str), "null");
+        snprintf(humidity_str, sizeof(humidity_str), "null");
+    }
+
     int n = snprintf(buf, cap,
-                     "{\"sensor\":%d,\"celsius\":%.2f,\"heating\":%s,"
-                     "\"relay_status\":\"%s\",\"start\":%.2f,\"stop\":%.2f,"
-                     "\"mode\":\"%s\"}",
-                     sensor, (double)celsius, heating ? "true" : "false",
+                     "{\"sensor\":%d,\"celsius\":%s,\"humidity\":%s,"
+                     "\"sensor_status\":\"%s\",\"heating\":%s,\"relay_status\":\"%s\","
+                     "\"start\":%.2f,\"stop\":%.2f,\"mode\":\"%s\"}",
+                     sensor, celsius_str, humidity_str, sensor_ok ? "ok" : "fault",
+                     heating ? "true" : "false",
                      ctrl_relay_status_str(heating), (double)start_c, (double)stop_c,
                      manual ? "manual" : "auto");
     if (n < 0 || (size_t)n >= cap) {

@@ -1,23 +1,25 @@
 # MQTT 协议使用文档
 
-设备 ID:`s3-thermostat-XXXXXX`(Kconfig 前缀 + STA MAC 后 3 字节)。
+设备 ID:`s3-thermostat-XXXXXX`(Kconfig 前缀 + STA MAC 后 3 字节),与 MQTT client_id 相同。
+本机(当前开发板)实测 ID 与命名空间见 [README](../README.md)「本机设备标识与 MQTT 身份」。
 下文以 `dev` 代指设备 ID,`n` 代指传感器索引(当前固件为 `0`)。
 
 ## 1. 主题总览
 
 | 主题 | 方向 | QoS | Retained | 说明 |
 |------|------|-----|----------|------|
-| `devices/{dev}/sensors/{n}/telemetry` | 上行 | 0 | 否 | 传感器遥测,每次有效采样一条 |
-| `devices/{dev}/sensors/{n}/command` | 下行 | 0/1 | 可 | 控制命令(严格校验) |
+| `devices/{dev}/sensors/{n}/telemetry` | 上行 | 0 | 否 | 传感器遥测(温湿度+状态),每次采样一条 |
+| `devices/{dev}/sensors/{n}/command` | 下行 | 0/1 | 否(建议) | 控制命令(严格校验) |
 | `devices/{dev}/sensors/{n}/command_result` | 上行 | 1 | 否 | 命令执行结果 |
 | `devices/{dev}/state` | 上行 | 1 | 是 | 设备整体状态(含保护/原因) |
 | `devices/{dev}/config` | 上行 | 1 | 是 | 当前生效配置 |
 | `devices/{dev}/availability` | 上行 | 1 | 是 | `online` / `offline`(LWT) |
 | `devices/{dev}/discovery` | 上行 | 1 | 是 | 发现/能力声明(幂等) |
-| `devices/{dev}/events/device_ready` | 上行 | 1 | 是 | 本地就绪广播(重连后幂等重发) |
-| `devices/{dev}/events/system_error` | 上行 | 1 | 是 | 系统错误(如传感器初始化失败) |
+| `devices/{dev}/events` | 上行 | 1 | 否 | 统一设备事件,`event` 字段:`device_ready` / `system_error` |
 
 **命令主题与遥测主题严格分离**;`command` 的主题尾段索引必须与载荷 `sensor` 字段一致。
+设备订阅精确主题 `devices/{dev}/sensors/0/command`(传感器索引固定 0,不使用 `+` 通配符);
+设备级 `devices/{dev}/command` 不订阅、不支持。
 
 ## 2. 统一 JSON 载荷
 
@@ -27,6 +29,8 @@
 {
   "sensor": 0,
   "celsius": 35.2,
+  "humidity": 45.5,
+  "sensor_status": "ok",
   "heating": true,
   "relay_status": "heating",
   "start": 35.0,
@@ -39,6 +43,8 @@
 |------|------|------|
 | `sensor` | 整数 | 0..31,必须等于主题尾段索引 |
 | `celsius` | 数值 | 有限数,∈ [-40, 125];**bool/NaN/Inf/字符串拒绝** |
+| `humidity` | 数值/null | %RH,∈ [0, 100];有效样本为数值,故障样本为 `null`;**仅遥测上报** |
+| `sensor_status` | 字符串 | `ok` / `fault`;**仅遥测上报** |
 | `heating` | bool | 与 `relay_status` 严格一致 |
 | `relay_status` | 字符串 | `heating` ↔ `heating:true`;`off` ↔ `heating:false` |
 | `start` / `stop` | 数值 | `start < stop`,均 ∈ [-40, 125];必须成对出现 |
@@ -47,18 +53,30 @@
 规则:
 - JSON 解析失败、非对象、出现未知字段 → 拒绝;
 - `heating` 与 `relay_status` 语义必须一致,冲突即拒绝(任何消息都不允许自相矛盾);
+- `humidity` 与 `sensor_status` 为**遥测上报字段**:命令载荷不得携带,出现即按 `unknown_field` 拒绝;
 - 遥测中的 `start`/`stop` 是**当前生效阈值**(含应用后的回显)。
 
 ## 3. 遥测(telemetry)
 
-每次有效采样(2 s 周期)发布,QoS0、不 retained:
+每次采样(2 s 周期)发布一条,QoS0、不 retained,携带温湿度测量值与传感器状态:
 
 ```json
-{"sensor":0,"celsius":35.2,"heating":true,"relay_status":"heating",
- "start":35.0,"stop":37.0,"mode":"auto"}
+{"sensor":0,"celsius":35.2,"humidity":45.5,"sensor_status":"ok",
+ "heating":true,"relay_status":"heating","start":35.0,"stop":37.0,"mode":"auto"}
 ```
 
-无效样本(超时/CRC 错/越界)**不产生**遥测,并禁止加热(见 state 的 `sample_valid`)。
+| 字段 | 说明 |
+|------|------|
+| `celsius` / `humidity` | 本样本测量值:温度 °C、湿度 %RH |
+| `sensor_status` | `ok` = 本样本有效;`fault` = 采样失败(超时/CRC 错/超量程) |
+
+无效样本(超时/CRC 错/超量程)**同样上报**,便于服务端感知传感器故障:
+测量值为 `null`、`sensor_status` 为 `fault`,并禁止加热(见 state 的 `sample_valid`)。
+
+```json
+{"sensor":0,"celsius":null,"humidity":null,"sensor_status":"fault",
+ "heating":false,"relay_status":"off","start":35.0,"stop":37.0,"mode":"auto"}
+```
 
 ## 4. 命令(command)
 
@@ -141,7 +159,7 @@
 
 - `protection`:`none|cooldown|fault_sensor|fault_overtemp|fault_timeout|safe_locked`;
 - `reason`:`periodic`(30 s 周期)/ `command` / `reconnect` / `output_change` 等变更原因;
-- `sample_valid`:最近样本是否有效。
+- `sample_valid`:最近样本是否有效(与遥测 `sensor_status` 同源:`true` ↔ `ok`)。
 
 ## 7. 配置(config,retained)
 
@@ -162,15 +180,31 @@
 (`"semantics":"commanded_state"`——**继电器语义为"指令状态"而非触点反馈**,
 无触点反馈硬件,故无法检测触点粘连)以及全部主题名。
 
-## 10. 事件(events,retained QoS1)
+## 10. 设备事件(events,QoS1、非 retained)
 
-- `devices/{dev}/events/device_ready`:
-  `{"device_id":"s3-thermostat-XXXXXX","uptime_s":<自上电秒数>}`
-  本地初始化完成即视为就绪(不依赖网络);MQTT 每次重连后幂等重发。
-- `devices/{dev}/events/system_error`:
-  `{"device_id":"...","error":<esp_err_t 码>,"source":"<模块名>"}`
+所有设备事件统一发布到 `devices/{dev}/events`,以 payload 的 `event` 字段区分类型。
+一次性事件**不使用 retained**(避免订阅者收到旧事件);`device_ready` 在每次 MQTT
+重连后幂等重发,在线订阅者总能看到最新就绪状态:
+
+- `event:"device_ready"`(就绪广播,重连后幂等重发):
+
+  ```json
+  {"event":"device_ready","device_id":"s3-thermostat-XXXXXX","uptime_s":<自上电秒数>}
+  ```
+
+  本地初始化完成即视为就绪(不依赖网络)。
+
+- `event:"system_error"`(系统错误):
+
+  ```json
+  {"event":"system_error","device_id":"...","error":<esp_err_t 码>,"source":"<模块名>"}
+  ```
+
   当前来源:`sensor`(SHT40 初始化失败,设备进入传感器故障安全态)。
   错误在 MQTT 连接前产生时先缓存,连上后补发(只保留最新一条)。
+
+**设备级 `devices/{dev}/command` 不支持**:固件不订阅该主题,向其发布无任何效果。
+命令一律通过 `devices/{dev}/sensors/{n}/command` 下发,避免命令歧义。
 
 ## 11. 运维注意事项
 

@@ -7,7 +7,8 @@
  *  - APP_EVENT_DEVICE_READY: emitted exactly once via
  *    device_manager_set_local_ready() when local control is up (idempotent).
  *  - APP_EVENT_SYSTEM_ERROR: posted by device_manager_report_error() and
- *    broadcast on `devices/<id>/events/system_error` (retained).
+ *    broadcast on the unified `devices/<id>/events` topic as
+ *    {"event":"system_error",...} (QoS1, non-retained).
  *  - SNTP time sync after APP_EVENT_WIFI_GOT_IP, executed on the service
  *    task with a bounded wait (never on the event loop).
  */

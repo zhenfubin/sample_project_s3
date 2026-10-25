@@ -8,16 +8,17 @@
 extern "C" {
 #endif
 
-#define APP_CFG_SSID_MAX 32
-#define APP_CFG_PASS_MAX 64
-#define APP_CFG_URI_MAX  128
+/* 字段长度上限 */
+#define APP_CFG_SSID_MAX 32  /* Wi-Fi SSID */
+#define APP_CFG_PASS_MAX 64  /* Wi-Fi 密码 */
+#define APP_CFG_URI_MAX  128 /* MQTT broker URI */
 
 typedef struct {
-    char wifi_ssid[APP_CFG_SSID_MAX];
-    char wifi_pass[APP_CFG_PASS_MAX];
-    char mqtt_uri[APP_CFG_URI_MAX];
-    float start_c;
-    float stop_c;
+    char wifi_ssid[APP_CFG_SSID_MAX]; /* Wi-Fi 名称(空 = 未配置) */
+    char wifi_pass[APP_CFG_PASS_MAX]; /* Wi-Fi 密码(开放网络为空) */
+    char mqtt_uri[APP_CFG_URI_MAX];   /* MQTT broker 地址,mqtt://... */
+    float start_c;                    /* 加热启动阈值(℃) */
+    float stop_c;                     /* 加热停止阈值(℃) */
 } app_cfg_t;
 
 /*

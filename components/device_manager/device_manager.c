@@ -72,11 +72,14 @@ static void dev_mgr_task(void *arg)
         bool connected = mqtt_manager_connected();
         if (connected && !was_connected) {
             /* Connected edge: (re)announce readiness and pending errors. */
+            /* 主题拼装统一使用 mqtt_manager 的 mqtt_mgr_make_topic() */
+            /* 设备事件统一发布到 devices/{id}/events,payload 的 event 字段区分类型 */
             if (s_local_ready) {
-                snprintf(topic, sizeof(topic), "devices/%s/events/device_ready", s_device_id);
-                snprintf(payload, sizeof(payload), "{\"device_id\":\"%s\",\"uptime_s\":%lld}",
+                mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/events", s_device_id);
+                snprintf(payload, sizeof(payload),
+                         "{\"event\":\"device_ready\",\"device_id\":\"%s\",\"uptime_s\":%lld}",
                          s_device_id, (long long)(esp_timer_get_time() / 1000000));
-                if (mqtt_manager_publish(topic, payload, 1, true) >= 0) {
+                if (mqtt_manager_publish(topic, payload, 1, false) >= 0) {
                     s_ready_posted = true;
                 }
             }
@@ -85,11 +88,13 @@ static void dev_mgr_task(void *arg)
 
         if (connected && s_err_pending) {
             s_err_pending = false;
-            snprintf(topic, sizeof(topic), "devices/%s/events/system_error", s_device_id);
+            mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/events", s_device_id);
             snprintf(payload, sizeof(payload),
-                     "{\"device_id\":\"%s\",\"error\":%d,\"source\":\"%s\"}", s_device_id,
-                     s_err_code, s_err_source);
-            mqtt_manager_publish(topic, payload, 1, true);
+                     "{\"event\":\"system_error\",\"device_id\":\"%s\",\"error\":%d,"
+                     "\"source\":\"%s\"}",
+                     s_device_id, s_err_code, s_err_source);
+            /* 一次性事件,QoS1、非 retained,避免订阅者收到旧事件 */
+            mqtt_manager_publish(topic, payload, 1, false);
         }
     }
 }

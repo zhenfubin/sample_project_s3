@@ -11,11 +11,11 @@ extern "C" {
  * Commands arrive as APP_EVENT_MQTT_MESSAGE; all publishes go through the
  * mqtt_manager pump. The relay GPIO is only written through this module. */
 typedef struct {
-    const char *device_id;
-    int sensor_index;        /* topic sensor index, 0 for the SHT40 */
-    bool start_safe_locked;  /* restart-guard lockout -> maintenance mode */
-    float start_c;
-    float stop_c;
+    const char *device_id;       /* 设备 ID,如 s3-thermostat-xxxxxx */
+    int sensor_index;        /* 主题传感器编号,0 = SHT40 */
+    bool start_safe_locked;  /* 启动安全锁未解 → 强制维护模式 */
+    float start_c;           /* 初始加热启动阈值(℃) */
+    float stop_c;            /* 初始加热停止阈值(℃) */
 } temperature_control_cfg_t;
 
 esp_err_t temperature_control_start(const temperature_control_cfg_t *cfg);

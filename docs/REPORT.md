@@ -8,7 +8,7 @@
 |----------|------|------|
 | 源码实现(任务书全部条目 + 事件机制规范 V1.1) | ✅ 完成 | 全部需求已实现 |
 | `idf.py build` 编译 | ✅ 通过 | 0 错误 0 警告 |
-| 主机单元测试 | ✅ 通过 | 4179 断言,0 失败(ctrl 1038 + LED 状态机 3141,细节见 §四) |
+| 主机单元测试 | ✅ 通过 | 4191 断言,0 失败(ctrl 1050 + LED 状态机 3141,细节见 §四) |
 | 首次刷写 + 启动日志抓取(COM4 实物) | ✅ 已做 | 75 s 启动日志;发现 2 个实机缺陷(见 §4.3) |
 | 缺陷修复 + 事件重构固件刷写 | ✅ 已做 | BUG 1–4 全部修复并刷写;80 s 复验:单次启动无复位,完整走完启动状态机至 RUNNING(见 §4.3) |
 | RGB 状态灯改造(WS2812@GPIO48) | ✅ 刷写验证 | 启动日志确认 `WS2812 RGB LED ready: GPIO=48 brightness=64`;灯语目视待用户确认(见 §4.4) |
@@ -53,9 +53,9 @@
 
 ```
 test_ctrl_logic   :  958 assertions passed, 0 failed
-test_ctrl_protocol:   80 assertions passed, 0 failed
+test_ctrl_protocol:   92 assertions passed, 0 failed
 test_led_pattern  : 3141 assertions passed, 0 failed   (RGB 灯语引擎,对应灯语规范 §7)
-合计              : 4179 passed, 0 failed
+合计              : 4191 passed, 0 failed
 ```
 
 用例覆盖(任务书规则 32 的核心场景):
@@ -72,7 +72,7 @@ test_led_pattern  : 3141 assertions passed, 0 failed   (RGB 灯语引擎,对应�
 | 8 | 连续加热 30min 超时保护 + 10min 冷却重试 | ✅ |
 | 9 | SAFE_LOCKED 全面封锁,满足条件/运维解锁 | ✅ |
 | 10 | 从未有过有效样本 → 永不加热 | ✅ |
-| 11 | 统一载荷构建与字段顺序/格式 | ✅ |
+| 11 | 统一载荷构建与字段顺序/格式(含 `humidity`/`sensor_status`) | ✅ |
 | 12 | 主题索引提取(含非法格式) | ✅ |
 | 13 | 合法命令解析(四类命令) | ✅ |
 | 14 | `sensor` 与主题索引不一致拒绝 | ✅ |
@@ -80,19 +80,10 @@ test_led_pattern  : 3141 assertions passed, 0 failed   (RGB 灯语引擎,对应�
 | 16 | 阈值规则(成对、范围、start<stop) | ✅ |
 | 17 | `heating`↔`relay_status` 一致性 | ✅ |
 | 18 | 过期规则:missing/clock_unsynced/expired/too_far/generic | ✅ |
+| 19 | 遥测扩展:湿度范围 [0,100] 校验、故障样本 `null`/`fault` 渲染 | ✅ |
 | — | `no_action` 空动作拒绝 | ✅ |
 
-测试命令(可复现):
-```powershell
-python -m ziglang cc -std=c2x -Wall -Wextra -Icomponents/ctrl_core/include -Itests/host `
-  tests/host/test_ctrl_logic.c components/ctrl_core/ctrl_logic.c -o test_ctrl_logic.exe
-python -m ziglang cc -std=c2x -Wall -Wextra -Icomponents/ctrl_core/include -Itests/host `
-  -Imanaged_components/espressif__cjson/cJSON tests/host/test_ctrl_protocol.c `
-  components/ctrl_core/ctrl_protocol.c components/ctrl_core/ctrl_logic.c `
-  managed_components/espressif__cjson/cJSON/cJSON.c -o test_ctrl_protocol.exe -lm
-python -m ziglang cc -std=c2x -Wall -Wextra -Icomponents/led_status/include -Itests/host `
-  tests/host/test_led_pattern.c components/led_status/led_pattern.c -o test_led_pattern.exe
-```
+测试命令(可复现,三套)见 [README](../README.md)「主机单元测试」。
 
 ### 4.2 固件构建
 
@@ -132,7 +123,7 @@ SHT40 实测在位(初始读数短暂无效→FAULT_SENSOR→3 个有效样本�
 
 ### 4.4 RGB 状态灯改造(WS2812 @ GPIO48)与实测
 
-依《RGB 指示灯状态规范》V1.0 重构灯语子系统,并将引脚指向 GPIO48 实物刷写验证:
+依[《RGB 指示灯状态规范》V1.0](<specs/%23 ESP32-S3 温控设备 RGB 指示灯状态规范.md>) 重构灯语子系统,并将引脚指向 GPIO48 实物刷写验证:
 
 - **架构**:纯 C 灯语引擎 `led_pattern.c`(时序/颜色/优先级解析,无硬件依赖,主机测试 3141 断言)
   + `led_status.c`(FreeRTOS 灯任务 + 事件侧唯一硬件写入者)。优先级 L6>L3>L1>L2>L0>L5>L4,
@@ -145,6 +136,20 @@ SHT40 实测在位(初始读数短暂无效→FAULT_SENSOR→3 个有效样本�
   单次 POWERON 无复位,完整走完启动状态机至 `RUNNING`;Wi-Fi 关联 `Xiaomi_35BF` 并获取 IP,
   MQTT 连接 broker 成功、时间同步,35 s 时 `relay -> heating`(对应 L5 绿色慢闪)。
   灯语目视效果待用户确认。
+
+### 4.5 遥测扩展:湿度与传感器状态上报(实机验证)
+
+- **改动**:`ctrl_payload_build()` 新增 `humidity`(%RH,∈ [0,100])与 `sensor_status`(`ok`/`fault`);
+  故障样本测量值输出 `null` 而非伪造数字。采样队列携带湿度,遥测由「仅有效样本」改为**每次采样一条**,
+  服务端可持续感知传感器状态;discovery 同步声明 `humidity_unit`。
+  命令 schema 不变:`humidity`/`sensor_status` 为上报字段,命令携带按 `unknown_field` 拒绝。
+- **主机测试**:`test_ctrl_protocol` 80 → 92 断言(新增湿度范围校验、故障样本 `null`/`fault` 渲染、
+  故障样本免测量值校验),合计 4191 断言通过。
+- **实测(COM4 刷写后 60 s 启动日志)**:遥测载荷
+  `{"sensor":0,"celsius":23.10,"humidity":57.20,"sensor_status":"ok","heating":false,...}`
+  按 2 s 周期上报;discovery 含 `"humidity_unit":"percent"`;串口温湿度日志正常(≈23.1°C / 57.2%)。
+  启动初期(471 ms)一次 `ESP_ERR_INVALID_RESPONSE` 失败采样,MQTT 尚未连接故无故障遥测可见,
+  随后自愈;故障遥测路径(`sensor_status":"fault"`,`null` 测量值)由主机测试覆盖。
 
 ## 五、遗留事项与上板建议(未验证项)
 
@@ -175,10 +180,12 @@ SHT40 实测在位(初始读数短暂无效→FAULT_SENSOR→3 个有效样本�
 │   ├── mqtt_manager/        MQTT+LWT+发布泵+单一重连所有者
 │   ├── device_manager/      DEVICE_READY/SYSTEM_ERROR 广播 + SNTP
 │   └── led_status/          事件驱动状态灯
-├── tests/host/              主机单元测试(1038 断言)
+├── tests/host/              主机单元测试(4191 断言)
 ├── partitions.csv           自定义分区表(16MB 单应用大分区)
 ├── sdkconfig.defaults       默认配置(flash 16MB + 自定义分区表)
-├── docs/DESIGN.md           详细设计文档
-├── docs/MQTT_PROTOCOL.md    MQTT 协议使用文档
-└── REPORT.md                本报告
+└── docs/
+    ├── DESIGN.md            详细设计文档
+    ├── MQTT_PROTOCOL.md     MQTT 协议使用文档
+    ├── REPORT.md            本报告
+    └── specs/               需求规范原文(任务书/RGB 灯语/事件机制/MQTT 主题配置)
 ```

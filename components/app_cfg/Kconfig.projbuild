@@ -5,13 +5,13 @@ menu "Application Configuration"
         range 0 48
         default 4
         help
-            GPIO driving the heating relay input.
+            驱动加热继电器输入的 GPIO 引脚号。
 
     config APP_RELAY_ACTIVE_HIGH
         bool "Relay is active-high (heating = drive 1)"
         default y
         help
-            When enabled, heating drives the GPIO to 1 and idle drives 0.
+            启用后:加热 = 输出 1,停止 = 输出 0(高电平有效继电器)。
 
     config APP_I2C_SDA_GPIO
         int "SHT40 I2C SDA GPIO"
@@ -27,32 +27,32 @@ menu "Application Configuration"
         string "Default MQTT broker URI"
         default "mqtt://192.168.31.242:1883"
         help
-            Used when no valid URI is stored in NVS.
+            NVS 中没有有效 URI 时使用的默认 MQTT broker 地址。
 
     config APP_DEVICE_ID_PREFIX
         string "Device ID prefix"
         default "s3-thermostat"
         help
-            The device ID is <prefix>-<last 3 octets of the STA MAC>.
+            设备 ID 格式:<前缀>-<STA MAC 后 3 字节>。
 
     config APP_LED_WS2812_GPIO
         int "WS2812 RGB status LED data GPIO (-1 = LED disabled)"
         range -1 48
         default 48
         help
-            GPIO driving the DIN of the onboard WS2812 addressable RGB LED
-            (spec: ESP32-S3 thermostat RGB LED status V1.0 §5 — a WS2812
-            must use its dedicated driver, never three plain GPIOs). On the
-            ESP32-S3-DevKitC-1 this is GPIO48. Set to -1 to disable the LED
-            module entirely (it compiles to a no-op).
+            板载 WS2812 幻彩 RGB 状态灯的数据引脚(DIN)。
+            (规范:ESP32-S3 温控设备 RGB 指示灯状态 V1.0 §5 —
+            WS2812 必须使用专用驱动,绝不允许用三个普通 GPIO 模拟。)
+            ESP32-S3-DevKitC-1 上为 GPIO48。设为 -1 可完全禁用
+            状态灯模块(编译为空实现)。
 
     config APP_LED_WS2812_BRIGHTNESS
         int "WS2812 LED channel brightness (1-255)"
         range 1 255
         default 64
         help
-            Per-channel level for lit channels (0 = off). Full-scale WS2812
-            is blindingly bright; 64 (~25%) is clearly visible without
-            glare. Spec colors stay exactly on/off; only intensity scales.
+            点亮通道的亮度级别(0 = 灭)。WS2812 满亮度非常刺眼,
+            64(约 25%)清晰可见又不刺眼。规范颜色保持精确开/关,
+            仅整体亮度缩放。
 
 endmenu

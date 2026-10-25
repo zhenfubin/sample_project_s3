@@ -35,16 +35,17 @@ typedef enum {
     APP_EVENT_ID_MAX,
 } app_event_id_t;
 
+/* MQTT 主题 / 载荷缓冲上限(协议 §12),全项目唯一定义处 */
 #define APP_EVENT_MQTT_TOPIC_MAX   160
 #define APP_EVENT_MQTT_PAYLOAD_MAX 512
 
 /* Payload of APP_EVENT_MQTT_MESSAGE. The event queue owns a copy; copy it
  * again if it must outlive the handler. */
 typedef struct {
-    char topic[APP_EVENT_MQTT_TOPIC_MAX];
-    char payload[APP_EVENT_MQTT_PAYLOAD_MAX];
-    int len;
-    bool retained;
+    char topic[APP_EVENT_MQTT_TOPIC_MAX];   /* 消息主题 */
+    char payload[APP_EVENT_MQTT_PAYLOAD_MAX]; /* 消息载荷(NUL 结尾) */
+    int len;      /* 载荷有效长度 */
+    bool retained; /* 是否为保留消息 */
 } app_event_mqtt_msg_t;
 
 /* Payload of APP_EVENT_SYSTEM_ERROR. */

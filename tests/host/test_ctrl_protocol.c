@@ -37,23 +37,40 @@ static bool parse_rejected(const char *json, int topic_sensor)
 static void test_payload_build(void)
 {
     char buf[256];
-    int n = ctrl_payload_build(buf, sizeof(buf), 0, 36.25f, true, 35.0f, 37.0f, false);
+    int n = ctrl_payload_build(buf, sizeof(buf), 0, 36.25f, 45.50f, true, true, 35.0f, 37.0f, false);
     CHECK(n > 0);
     CHECK(strstr(buf, "\"sensor\":0") != NULL);
     CHECK(strstr(buf, "\"celsius\":36.25") != NULL);
+    CHECK(strstr(buf, "\"humidity\":45.50") != NULL);
+    CHECK(strstr(buf, "\"sensor_status\":\"ok\"") != NULL);
     CHECK(strstr(buf, "\"heating\":true") != NULL);
     CHECK(strstr(buf, "\"relay_status\":\"heating\"") != NULL);
     CHECK(strstr(buf, "\"start\":35.00") != NULL);
     CHECK(strstr(buf, "\"stop\":37.00") != NULL);
     CHECK(strstr(buf, "\"mode\":\"auto\"") != NULL);
 
+    /* 故障样本:测量值输出 null,状态输出 fault。 */
+    n = ctrl_payload_build(buf, sizeof(buf), 0, 0.0f, 0.0f, false, false, 35.0f, 37.0f, false);
+    CHECK(n > 0);
+    CHECK(strstr(buf, "\"celsius\":null") != NULL);
+    CHECK(strstr(buf, "\"humidity\":null") != NULL);
+    CHECK(strstr(buf, "\"sensor_status\":\"fault\"") != NULL);
+    CHECK(strstr(buf, "\"relay_status\":\"off\"") != NULL);
+
+    /* 故障样本不校验测量值(反正输出 null),但阈值仍必须有限。 */
+    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, NAN, NAN, false, false, 35, 37, false) > 0);
+    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, 0.0f, 0.0f, false, false, NAN, 37, false) < 0);
+
     /* Invalid values must be refused rather than published. */
-    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, NAN, false, 35, 37, false) < 0);
-    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, INFINITY, false, 35, 37, false) < 0);
-    CHECK(ctrl_payload_build(buf, sizeof(buf), -1, 36.0f, false, 35, 37, false) < 0);
-    CHECK(ctrl_payload_build(buf, sizeof(buf), 32, 36.0f, false, 35, 37, false) < 0);
-    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, 300.0f, false, 35, 37, false) < 0);
-    CHECK(ctrl_payload_build(buf, 4, 0, 36.0f, false, 35, 37, false) < 0); /* tiny buffer */
+    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, NAN, 45.0f, true, false, 35, 37, false) < 0);
+    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, INFINITY, 45.0f, true, false, 35, 37, false) < 0);
+    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, 36.0f, NAN, true, false, 35, 37, false) < 0);
+    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, 36.0f, -0.5f, true, false, 35, 37, false) < 0);
+    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, 36.0f, 150.0f, true, false, 35, 37, false) < 0);
+    CHECK(ctrl_payload_build(buf, sizeof(buf), -1, 36.0f, 45.0f, true, false, 35, 37, false) < 0);
+    CHECK(ctrl_payload_build(buf, sizeof(buf), 32, 36.0f, 45.0f, true, false, 35, 37, false) < 0);
+    CHECK(ctrl_payload_build(buf, sizeof(buf), 0, 300.0f, 45.0f, true, false, 35, 37, false) < 0);
+    CHECK(ctrl_payload_build(buf, 4, 0, 36.0f, 45.0f, true, false, 35, 37, false) < 0); /* tiny buffer */
 }
 
 static void test_topic_index(void)
