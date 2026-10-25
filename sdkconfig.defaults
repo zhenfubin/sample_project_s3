@@ -1,0 +1,9 @@
+# Project defaults applied on fresh configuration (sdkconfig itself is
+# gitignored). 16MB flash + custom partition table with a large app partition.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Status RGB LED: onboard WS2812 (addressable, single data wire) on GPIO48
+# (ESP32-S3-DevKitC-1). Spec §5: WS2812 must use its dedicated driver.
+CONFIG_APP_LED_WS2812_GPIO=48

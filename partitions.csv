@@ -1,0 +1,7 @@
+# Name,   Type, SubType, Offset,   Size,     Flags
+# Custom partition table for 16MB flash (ESP32-S3).
+# Table at 0x8000 (CONFIG_PARTITION_TABLE_OFFSET).
+# factory app aligned to 0x10000 and fills the remaining flash:
+# 0x1000000 - 0x10000 = 0xFF0000 (16320 KB).
+nvs,      data, nvs,     0x9000,   0x6000,
+factory,  app,  factory,  0x10000,  0xFF0000,

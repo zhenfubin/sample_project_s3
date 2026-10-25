@@ -1,0 +1,58 @@
+menu "Application Configuration"
+
+    config APP_RELAY_GPIO
+        int "Heating relay GPIO number"
+        range 0 48
+        default 4
+        help
+            GPIO driving the heating relay input.
+
+    config APP_RELAY_ACTIVE_HIGH
+        bool "Relay is active-high (heating = drive 1)"
+        default y
+        help
+            When enabled, heating drives the GPIO to 1 and idle drives 0.
+
+    config APP_I2C_SDA_GPIO
+        int "SHT40 I2C SDA GPIO"
+        range 0 48
+        default 8
+
+    config APP_I2C_SCL_GPIO
+        int "SHT40 I2C SCL GPIO"
+        range 0 48
+        default 9
+
+    config APP_MQTT_URI_DEFAULT
+        string "Default MQTT broker URI"
+        default "mqtt://192.168.31.242:1883"
+        help
+            Used when no valid URI is stored in NVS.
+
+    config APP_DEVICE_ID_PREFIX
+        string "Device ID prefix"
+        default "s3-thermostat"
+        help
+            The device ID is <prefix>-<last 3 octets of the STA MAC>.
+
+    config APP_LED_WS2812_GPIO
+        int "WS2812 RGB status LED data GPIO (-1 = LED disabled)"
+        range -1 48
+        default 48
+        help
+            GPIO driving the DIN of the onboard WS2812 addressable RGB LED
+            (spec: ESP32-S3 thermostat RGB LED status V1.0 §5 — a WS2812
+            must use its dedicated driver, never three plain GPIOs). On the
+            ESP32-S3-DevKitC-1 this is GPIO48. Set to -1 to disable the LED
+            module entirely (it compiles to a no-op).
+
+    config APP_LED_WS2812_BRIGHTNESS
+        int "WS2812 LED channel brightness (1-255)"
+        range 1 255
+        default 64
+        help
+            Per-channel level for lit channels (0 = off). Full-scale WS2812
+            is blindingly bright; 64 (~25%) is clearly visible without
+            glare. Spec colors stay exactly on/off; only intensity scales.
+
+endmenu
