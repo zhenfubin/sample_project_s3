@@ -56,7 +56,8 @@ BOOT_SAFE → INIT_NVS → LOAD_CONFIG → INIT_DRIVERS → INIT_CONTROL
 - **RECOVERY**:看门狗/健康升级触发后的恢复尝试。
 - **SAFE_LOCKED**:安全锁死,加热被强制关闭,需满足解锁条件(见 §6)。
 
-状态迁移逐条打日志(`boot: state -> state`),并记录复位原因(esp_reset_reason)。
+状态迁移逐条打串口日志(初始化进度 `[n/11]: 中文说明 (boot state -> 状态名)`),
+并记录复位原因(esp_reset_reason)。
 
 ## 3. 继电器安全初始化
 
@@ -103,7 +104,7 @@ T = -45 + 175 * (raw / 65535)
 | 模式 | 行为 |
 |------|------|
 | `AUTO` | 迟滞逻辑自动控制 |
-| `MANUAL_ON` | 强制加热,**必须**携带可验证的 `expires_at`;最长 `manual_max_ms=15min` |
+| `MANUAL_ON` | 强制加热,**必须**携带可验证的 `expires_at`;最长 `manual_max_ms=2h` |
 | `MANUAL_OFF` | 强制停止 |
 
 ### 5.4 保护状态(优先级高于一切手动/自动请求)
@@ -112,13 +113,17 @@ T = -45 + 175 * (raw / 65535)
 |------|----------|----------|
 | `FAULT_SENSOR` | 无效样本/样本超时(`sensor_stale_ms=8s`) | 连续 3 个有效样本(`sensor_recover_samples`) |
 | `FAULT_OVERTEMP` | `celsius ≥ overtemp(40)` | 温度 ≤ `stop` |
-| `FAULT_TIMEOUT` | 连续加热超过 `heat_max_ms=30min`(任何模式) | 停止加热并冷却 `timeout_retry_ms=10min` 后 |
+| `FAULT_TIMEOUT` | 连续加热超过 `heat_max_ms=2h`(任何模式) | 停止加热并冷却 `timeout_retry_ms=10min` 后 |
 | `COOLDOWN` | 故障退出后的冷却窗口 | `cooldown_ms=30s` 后 |
 | `SAFE_LOCKED` | 显式锁定/紧急停机/重启保护锁死 | 锁定满 `safe_lock_ms=30min` + 温度 ≤ `stop` + 有效样本,或运维 `auto` 命令显式解锁 |
 
 **任何保护激活时输出恒为断开**,手动命令返回 `rejected/refused_by_protection`。
 `manual_deadline_ms` 到期自动回 `AUTO`。所有时间用单调时钟(`esp_timer` 毫秒),
 仅协议过期判断用 SNTP Unix 时间。
+
+**保护状态串口日志**:启动时打印初始保护状态;此后任何保护状态变更在控制任务
+以 1 s 轮询边沿检测并打印(`保护状态进入/解除: 旧 -> 新`,进入故障/安全锁用 E、
+冷却用 W、解除用 I),覆盖 tick 自动迁移、命令触发与紧急停机全部路径。
 
 ### 5.5 采样有效性
 - `sample_valid=false` 时:禁止加热,已有加热立即停止;
@@ -226,3 +231,34 @@ Kconfig(`menuconfig → App Configuration`):`APP_RELAY_GPIO=4`、
   便于移植到无 RGB 灯板型;
 - **合规**:规范 §5 要求 WS2812 用专用驱动(禁三路独立 GPIO 色彩方案),
   故采用 `espressif/led_strip` 3.1.1(RMT 后端)。
+
+## 13. 风扇调速与测速(fan_ctrl,4 线 PWM 风扇)
+
+依[《4 线 PWM 风扇接入规范》](<specs/%23 ESP32-S3 4线PWM风扇接入规范.md>)实现,
+接线见规范 §3(TACH 上拉必须接 3.3 V,**严禁 5 V**)。分层与温控控制回路一致:
+
+| 层 | 文件 | 职责 |
+|----|------|------|
+| 状态判定(纯 C) | `ctrl_logic.c` `ctrl_fan_status_eval()` | duty/rpm/持续时间→`off/ok/stall/overrun`,主机测试覆盖 |
+| 协议(纯 C) | `ctrl_protocol.c` | 风扇命令解析/主题索引/遥测与应答载荷构建 |
+| 硬件驱动 | `fan_ctrl.c/h` | LEDC PWM 输出 + PCNT 转速计数,1 s 测速窗口 |
+| 集成 | `temperature_control.c` | 遥测节流、命令路由、堵转事件上报、失控空转告警 |
+
+- **PWM 调速**:LEDC 25 kHz(风扇 PWM 规范频率)、10-bit 分辨率
+  (`APP_FAN_PWM_GPIO=5`),占空比 0..100%;25 kHz 在音频之上,无啸叫;
+- **转速测量**:PCNT 脉冲计数(`APP_FAN_TACH_GPIO=6`,2 脉冲/转,开漏输出
+  需 10 kΩ 上拉至 3.3 V),1 s 定时窗口取计数换算
+  `rpm = 脉冲数 × 60 / 2`,硬件消隐滤波 1 μs;
+- **堵转判定**(`CTRL_FAN_STALL_MS=3000`):占空比 >0 持续 3 s 无脉冲 →
+  `stall`(边沿触发 `fan_stall` 事件);启动 3 s 宽限期内 `rpm=0` 仍报 `ok`;
+- **停机惯性与失控空转**(`CTRL_FAN_SPINDOWN_MS=3000`):duty=0 时 `rpm>0`
+  在 3 s 停机惯性宽限内仍报 `off`;宽限期后仍持续旋转 → `overrun`
+  (PWM 未生效——接线/风扇类型问题,边沿 ERROR 日志,不谎报 `off`);
+- **安全语义**:仅手动调速(不与温控联动,避免歧义);占空比不持久化,
+  重启回 Kconfig 初始值(默认 0%);风扇未启用(引脚 -1)时驱动不初始化、
+  无遥测,命令应答 `pwm_disabled`;
+- **MQTT**:独立命名空间 `fans/0/*`(见 [MQTT_PROTOCOL](MQTT_PROTOCOL.md)
+  §2.1/§3.1/§4.3),遥测 5 s 周期 + 变化即发,堵转事件走统一 `events` 主题;
+- **API 兼容**:IDF v6.1 PCNT 驱动为 `pcnt_*` 前缀
+  (头文件仍为 `driver/pulse_cnt.h`),毛刺滤波经
+  `pcnt_unit_set_glitch_filter()` 单独配置。

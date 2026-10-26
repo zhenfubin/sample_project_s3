@@ -34,6 +34,10 @@ static volatile bool s_sntp_started;
 static volatile bool s_err_pending;
 static int s_err_code;
 static char s_err_source[16];
+static volatile bool s_fan_stall_pending; /* 风扇堵转事件待发(断线期间保留) */
+static int s_fan_stall_fan;
+static int s_fan_stall_duty;
+static int s_fan_stall_rpm;
 
 static void dev_mgr_task(void *arg)
 {
@@ -96,6 +100,17 @@ static void dev_mgr_task(void *arg)
             /* 一次性事件,QoS1、非 retained,避免订阅者收到旧事件 */
             mqtt_manager_publish(topic, payload, 1, false);
         }
+
+        if (connected && s_fan_stall_pending) {
+            s_fan_stall_pending = false;
+            mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/events", s_device_id);
+            snprintf(payload, sizeof(payload),
+                     "{\"event\":\"fan_stall\",\"device_id\":\"%s\",\"fan\":%d,"
+                     "\"duty\":%d,\"rpm\":%d}",
+                     s_device_id, s_fan_stall_fan, s_fan_stall_duty, s_fan_stall_rpm);
+            /* 堵转一次性事件:QoS1、非 retained */
+            mqtt_manager_publish(topic, payload, 1, false);
+        }
     }
 }
 
@@ -155,6 +170,21 @@ void device_manager_report_error(int err, const char *source)
     s_err_pending = true;
 
     event_manager_publish(APP_EVENT_SYSTEM_ERROR, payload.source, err, &payload, sizeof(payload));
+    if (s_task) {
+        xTaskNotifyGive(s_task);
+    }
+}
+
+void device_manager_report_fan_stall(int fan, int duty, int rpm)
+{
+    app_event_fan_t payload = {.fan = fan, .duty = duty, .rpm = rpm};
+
+    s_fan_stall_fan = fan;
+    s_fan_stall_duty = duty;
+    s_fan_stall_rpm = rpm;
+    s_fan_stall_pending = true;
+
+    event_manager_publish(APP_EVENT_FAN_STALL, TAG, 0, &payload, sizeof(payload));
     if (s_task) {
         xTaskNotifyGive(s_task);
     }

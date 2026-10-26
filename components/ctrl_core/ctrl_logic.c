@@ -24,8 +24,8 @@ void ctrl_set_defaults(ctrl_params_t *p)
     p->max_c = CTRL_LIMIT_MAX_C;
     p->sample_period_ms = 2000;
     p->sensor_stale_ms = 8000;
-    p->manual_max_ms = 15 * 60 * 1000;
-    p->heat_max_ms = 30 * 60 * 1000;
+    p->manual_max_ms = 2 * 60 * 60 * 1000;
+    p->heat_max_ms = 2 * 60 * 60 * 1000;
     p->cooldown_ms = 30 * 1000;
     p->timeout_retry_ms = 10 * 60 * 1000;
     p->safe_lock_ms = 30 * 60 * 1000;
@@ -296,5 +296,35 @@ const char *ctrl_prot_str(ctrl_prot_t p)
     case CTRL_PROT_SAFE_LOCKED:
     default:
         return "safe_locked";
+    }
+}
+
+fan_status_t ctrl_fan_status_eval(uint8_t duty_pct, uint32_t rpm, uint32_t zero_ms,
+                                  uint32_t off_spin_ms, uint32_t stall_ms, uint32_t spindown_ms)
+{
+    if (duty_pct == 0) {
+        /* 指令停转:惯性余转仍算 off;持续旋转超宽限期说明 PWM 未生效,
+         * 实际转速与指令矛盾,判定失控空转(不得继续谎报 off) */
+        return (rpm > 0 && off_spin_ms >= spindown_ms) ? FAN_STATUS_OVERRUN : FAN_STATUS_OFF;
+    }
+    if (rpm > 0) {
+        return FAN_STATUS_OK;
+    }
+    /* 占空比>0 但无脉冲:未到判定时长视为启动宽限期,超时判定堵转 */
+    return (zero_ms >= stall_ms) ? FAN_STATUS_STALL : FAN_STATUS_OK;
+}
+
+const char *ctrl_fan_status_str(fan_status_t st)
+{
+    switch (st) {
+    case FAN_STATUS_OFF:
+        return "off";
+    case FAN_STATUS_STALL:
+        return "stall";
+    case FAN_STATUS_OVERRUN:
+        return "overrun";
+    case FAN_STATUS_OK:
+    default:
+        return "ok";
     }
 }

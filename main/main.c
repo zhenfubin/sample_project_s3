@@ -76,6 +76,10 @@ void app_main(void)
         .start_safe_locked = (guard == GUARD_SAFE_LOCKED),
         .start_c = cfg.start_c,
         .stop_c = cfg.stop_c,
+        .fan_pwm_gpio = CONFIG_APP_FAN_PWM_GPIO,
+        .fan_tach_gpio = CONFIG_APP_FAN_TACH_GPIO,
+        .fan_default_duty = CONFIG_APP_FAN_DEFAULT_DUTY,
+        .fan_index = 0,
     };
     ESP_ERROR_CHECK(temperature_control_start(&ccfg));
     app_health_start(guard == GUARD_SAFE_LOCKED);

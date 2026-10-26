@@ -50,7 +50,8 @@ static volatile bool s_net_ready;           /* Wi-Fi 已获 IP,允许连接 */
 static volatile bool s_sup_reset;           /* 复位重连退避计数 */
 static char s_device_id[32];                /* 设备 ID */
 static char s_avail_topic[MQTT_TOPIC_MAX];  /* 遗嘱/在线主题 devices/{id}/availability */
-static char s_cmd_topic[MQTT_TOPIC_MAX];     /* 命令主题 devices/{id}/sensors/0/command(唯一命令入口) */
+static char s_cmd_topic[MQTT_TOPIC_MAX];     /* 命令主题 devices/{id}/sensors/0/command(唯一传感器命令入口) */
+static char s_fan_cmd_topic[MQTT_TOPIC_MAX]; /* 风扇命令主题 devices/{id}/fans/0/command */
 
 static void supervisor_task(void *arg);
 static void pub_task(void *arg);
@@ -78,11 +79,13 @@ static void handle_mqtt_event(void *arg, esp_event_base_t base, int32_t event_id
         ESP_LOGI(TAG, "connected to broker");
         /* Safe here: the client's own event context, recursive API lock. */
         esp_mqtt_client_publish(s_client, s_avail_topic, "online", 0, 1, 1);
-        /* 仅订阅传感器命令主题(索引 0 精确主题,不用通配符);
+        /* 仅订阅传感器/风扇命令主题(索引 0 精确主题,不用通配符);
          * 设备级 command 不支持,不订阅以防客户端误用 */
         esp_mqtt_client_subscribe(s_client, s_cmd_topic, 1);
+        esp_mqtt_client_subscribe(s_client, s_fan_cmd_topic, 1);
         /* MQTT 订阅串口日志 */
         ESP_LOGI(TAG, "已订阅MQTT主题: %s", s_cmd_topic);
+        ESP_LOGI(TAG, "已订阅MQTT主题: %s", s_fan_cmd_topic);
         event_manager_publish(APP_EVENT_MQTT_CONNECTED, TAG, 0, NULL, 0);
         if (s_supervisor) {
             xTaskNotifyGive(s_supervisor);
@@ -153,7 +156,9 @@ esp_err_t mqtt_manager_init(const char *uri, const char *device_id)
     if (mqtt_mgr_make_topic(s_avail_topic, sizeof(s_avail_topic), "devices/%s/availability",
                             s_device_id) < 0 ||
         mqtt_mgr_make_topic(s_cmd_topic, sizeof(s_cmd_topic),
-                            "devices/%s/sensors/0/command", s_device_id) < 0) {
+                            "devices/%s/sensors/0/command", s_device_id) < 0 ||
+        mqtt_mgr_make_topic(s_fan_cmd_topic, sizeof(s_fan_cmd_topic),
+                            "devices/%s/fans/0/command", s_device_id) < 0) {
         return ESP_ERR_INVALID_SIZE;
     }
 

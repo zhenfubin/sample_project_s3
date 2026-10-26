@@ -358,3 +358,116 @@ const char *ctrl_cmd_result_str(ctrl_cmd_result_t r)
         return "rejected";
     }
 }
+
+int ctrl_fan_payload_build(char *buf, size_t cap, int fan, uint8_t duty_pct, uint32_t rpm,
+                           fan_status_t status)
+{
+    if (buf == NULL || cap == 0) {
+        return -1;
+    }
+    if (fan < 0 || fan > 31) {
+        return -1;
+    }
+    if (duty_pct > CTRL_FAN_DUTY_MAX) {
+        return -1;
+    }
+    int n = snprintf(buf, cap,
+                     "{\"fan\":%d,\"duty\":%d,\"rpm\":%lu,\"status\":\"%s\"}",
+                     fan, (int)duty_pct, (unsigned long)rpm, ctrl_fan_status_str(status));
+    if (n < 0 || (size_t)n >= cap) {
+        return -1;
+    }
+    return n;
+}
+
+int ctrl_topic_fan_index(const char *topic)
+{
+    if (topic == NULL) {
+        return -1;
+    }
+    const char *p = strstr(topic, "/fans/");
+    if (p == NULL) {
+        return -1;
+    }
+    p += strlen("/fans/");
+    if (*p < '0' || *p > '9') {
+        return -1;
+    }
+    long v = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + (*p - '0');
+        if (v > 31) {
+            return -1;
+        }
+        p++;
+    }
+    /* 必须是完整路径段:"0/telemetry",而非 "01x" */
+    if (*p != '\0' && *p != '/') {
+        return -1;
+    }
+    return (int)v;
+}
+
+bool ctrl_fan_cmd_parse(const char *json, int json_len, int topic_fan, ctrl_fan_cmd_t *out,
+                        char *errbuf, size_t err_cap)
+{
+    static const char *const keys[] = {"fan", "duty", "cmd_id"};
+
+    if (out == NULL || json == NULL || json_len <= 0) {
+        return err(errbuf, err_cap, "empty_payload");
+    }
+
+    cJSON *root = cJSON_ParseWithLength(json, (size_t)json_len);
+    if (root == NULL) {
+        return err(errbuf, err_cap, "malformed_json");
+    }
+
+    bool ok = false;
+    memset(out, 0, sizeof(*out));
+    out->fan = -1;
+
+    do {
+        if (!cJSON_IsObject(root)) {
+            err(errbuf, err_cap, "not_object");
+            break;
+        }
+        if (!only_known_keys(root, keys, sizeof(keys) / sizeof(keys[0]), errbuf, err_cap)) {
+            break;
+        }
+
+        long fan = -1;
+        if (!json_int_in(root, "fan", 0, 31, &fan)) {
+            err(errbuf, err_cap, "bad_fan");
+            break;
+        }
+        /* Rule: payload "fan" must match the trailing topic index. */
+        if (topic_fan >= 0 && (long)topic_fan != fan) {
+            err(errbuf, err_cap, "fan_topic_mismatch");
+            break;
+        }
+        out->fan = (int)fan;
+
+        /* duty 必填:整数 0-100(%) */
+        long duty = -1;
+        if (!json_int_in(root, "duty", 0, CTRL_FAN_DUTY_MAX, &duty)) {
+            err(errbuf, err_cap, "bad_duty");
+            break;
+        }
+        out->duty = (uint8_t)duty;
+
+        const cJSON *cid = cJSON_GetObjectItemCaseSensitive(root, "cmd_id");
+        if (cid != NULL) {
+            if (!cJSON_IsString(cid) || cid->valuestring == NULL ||
+                strlen(cid->valuestring) >= sizeof(out->cmd_id)) {
+                err(errbuf, err_cap, "bad_cmd_id");
+                break;
+            }
+            snprintf(out->cmd_id, sizeof(out->cmd_id), "%s", cid->valuestring);
+        }
+
+        ok = true;
+    } while (0);
+
+    cJSON_Delete(root);
+    return ok;
+}

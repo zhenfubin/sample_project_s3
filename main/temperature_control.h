@@ -16,6 +16,10 @@ typedef struct {
     bool start_safe_locked;  /* 启动安全锁未解 → 强制维护模式 */
     float start_c;           /* 初始加热启动阈值(℃) */
     float stop_c;            /* 初始加热停止阈值(℃) */
+    int fan_pwm_gpio;        /* 4线风扇 PWM 调速引脚,-1=禁用调速 */
+    int fan_tach_gpio;       /* 4线风扇测速引脚,-1=禁用测速 */
+    uint8_t fan_default_duty; /* 风扇上电初始占空比(%),不持久化 */
+    int fan_index;           /* 主题风扇编号,0 = fans/0 */
 } temperature_control_cfg_t;
 
 esp_err_t temperature_control_start(const temperature_control_cfg_t *cfg);

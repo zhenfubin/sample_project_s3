@@ -261,6 +261,42 @@ static void test_no_sample_no_heating(void)
     CHECK(!ctrl_manual_on(&s, 5000));
 }
 
+static void test_fan_status_eval(void)
+{
+    /* 占空比 0:停转是预期;停机惯性余转在宽限期内也算 off。 */
+    CHECK(ctrl_fan_status_eval(0, 0, 0, 0, 3000, 3000) == FAN_STATUS_OFF);
+    CHECK(ctrl_fan_status_eval(0, 1250, 0, 0, 3000, 3000) == FAN_STATUS_OFF);    /* 刚停机 */
+    CHECK(ctrl_fan_status_eval(0, 1250, 0, 2999, 3000, 3000) == FAN_STATUS_OFF); /* 宽限期内 */
+    CHECK(ctrl_fan_status_eval(0, 0, 999999, 0, 3000, 3000) == FAN_STATUS_OFF);
+
+    /* 占空比 0 但持续旋转超宽限期:PWM 未生效,判定失控空转,不得再报 off。 */
+    CHECK(ctrl_fan_status_eval(0, 840, 0, 3000, 3000, 3000) == FAN_STATUS_OVERRUN); /* 边界 */
+    CHECK(ctrl_fan_status_eval(0, 1250, 0, 5000, 3000, 3000) == FAN_STATUS_OVERRUN);
+    CHECK(ctrl_fan_status_eval(0, 1250, 0, 999999, 3000, 3000) == FAN_STATUS_OVERRUN);
+    /* 转速为 0 时计时无意义,仍为 off。 */
+    CHECK(ctrl_fan_status_eval(0, 0, 0, 999999, 3000, 3000) == FAN_STATUS_OFF);
+
+    /* 占空比>0 且有转速:ok。 */
+    CHECK(ctrl_fan_status_eval(50, 1250, 0, 0, 3000, 3000) == FAN_STATUS_OK);
+    CHECK(ctrl_fan_status_eval(100, 1, 0, 0, 3000, 3000) == FAN_STATUS_OK);
+    CHECK(ctrl_fan_status_eval(80, 3000, 99999, 0, 3000, 3000) == FAN_STATUS_OK);
+
+    /* 占空比>0 无转速:启动宽限期内 ok,超时 stall。 */
+    CHECK(ctrl_fan_status_eval(50, 0, 0, 0, 3000, 3000) == FAN_STATUS_OK);       /* 刚启动 */
+    CHECK(ctrl_fan_status_eval(50, 0, 2999, 0, 3000, 3000) == FAN_STATUS_OK);    /* 宽限期内 */
+    CHECK(ctrl_fan_status_eval(50, 0, 3000, 0, 3000, 3000) == FAN_STATUS_STALL); /* 边界:判定堵转 */
+    CHECK(ctrl_fan_status_eval(50, 0, 10000, 0, 3000, 3000) == FAN_STATUS_STALL);
+    CHECK(ctrl_fan_status_eval(100, 0, 5000, 0, 3000, 3000) == FAN_STATUS_STALL);
+}
+
+static void test_fan_status_str(void)
+{
+    CHECK_EQ_STR(ctrl_fan_status_str(FAN_STATUS_OFF), "off");
+    CHECK_EQ_STR(ctrl_fan_status_str(FAN_STATUS_OK), "ok");
+    CHECK_EQ_STR(ctrl_fan_status_str(FAN_STATUS_STALL), "stall");
+    CHECK_EQ_STR(ctrl_fan_status_str(FAN_STATUS_OVERRUN), "overrun");
+}
+
 int main(void)
 {
     test_hysteresis();
@@ -273,5 +309,7 @@ int main(void)
     test_continuous_heat_timeout();
     test_safe_locked();
     test_no_sample_no_heating();
+    test_fan_status_eval();
+    test_fan_status_str();
     TEST_REPORT("ctrl_logic");
 }

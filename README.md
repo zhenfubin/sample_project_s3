@@ -29,9 +29,10 @@ SHT40 温湿度采集 + 继电器迟滞加热控制 + MQTT 远程管理的温控
 
 ### MQTT 主题
 
-本机 8 个主题(`{n}` = 传感器索引,当前为 `0`)的方向、QoS/Retained、载荷格式
+本机 11 个主题(`{n}` = 传感器/风扇索引,当前均为 `0`)的方向、QoS/Retained、载荷格式
 与命令语义以 [docs/MQTT_PROTOCOL.md](docs/MQTT_PROTOCOL.md) §1 为唯一权威。
-命令唯一入口 `devices/s3-thermostat-83A2A0/sensors/0/command`;
+命令唯一入口 `devices/s3-thermostat-83A2A0/sensors/0/command`(温控)与
+`devices/s3-thermostat-83A2A0/fans/0/command`(风扇调速);
 设备级 `devices/{id}/command` **不订阅、不支持**,向其发布无任何效果。
 
 ## 默认硬件配置(menuconfig → App Configuration 可改)
@@ -40,6 +41,8 @@ SHT40 温湿度采集 + 继电器迟滞加热控制 + MQTT 远程管理的温控
 |------|------|
 | 加热继电器 | GPIO4,高电平有效 |
 | SHT40 I2C | SDA=GPIO8,SCL=GPIO9 |
+| 风扇 PWM 调速 | GPIO5,LEDC 25 kHz(接线见 [风扇接入规范](docs/specs/%23%20ESP32-S3%204线PWM风扇接入规范.md)) |
+| 风扇 TACH 测速 | GPIO6,PCNT 计数(**上拉电阻必须接 3.3 V,严禁 5 V**) |
 | MQTT Broker | `mqtt://192.168.31.242:1883` |
 
 ## 分区布局(自定义,[partitions.csv](partitions.csv),16MB flash)

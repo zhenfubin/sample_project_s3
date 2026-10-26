@@ -49,6 +49,26 @@ const char *ctrl_mode_str(ctrl_mode_t m);        /* "auto" | "manual" */
 const char *ctrl_relay_status_str(bool heating); /* "heating" | "off" */
 const char *ctrl_prot_str(ctrl_prot_t p);
 
+/* ---- 4线 PWM 风扇状态(纯逻辑,host 可测) ---- */
+typedef enum {
+    FAN_STATUS_OFF = 0,      /* 占空比 0 且已停转(或惯性余转尚在宽限期内) */
+    FAN_STATUS_OK = 1,       /* 正常:有转速,或占空比>0 尚在启动宽限期内 */
+    FAN_STATUS_STALL = 2,    /* 堵转:占空比>0 且持续无转速脉冲 */
+    FAN_STATUS_OVERRUN = 3,  /* 失控空转:占空比 0 但持续旋转超宽限期(PWM 未生效) */
+} fan_status_t;
+
+/* 风扇状态判定:
+ * - duty==0:off_spin_ms(占空比 0 且持续有转速的时长)未达 spindown_ms
+ *   视为停机惯性余转(off),达到则判定失控空转(overrun,PWM 未生效);
+ * - duty>0 且 rpm>0:ok;
+ * - duty>0 且 rpm==0:连续零转速时长 zero_ms 未达 stall_ms 视为启动
+ *   宽限期(ok),达到则判定堵转(stall)。
+ * stall_ms / spindown_ms 由调用方注入,便于单测。 */
+fan_status_t ctrl_fan_status_eval(uint8_t duty_pct, uint32_t rpm, uint32_t zero_ms,
+                                  uint32_t off_spin_ms, uint32_t stall_ms, uint32_t spindown_ms);
+
+const char *ctrl_fan_status_str(fan_status_t st); /* "off" | "ok" | "stall" | "overrun" */
+
 #ifdef __cplusplus
 }
 #endif

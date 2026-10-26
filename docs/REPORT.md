@@ -8,12 +8,13 @@
 |----------|------|------|
 | 源码实现(任务书全部条目 + 事件机制规范 V1.1) | ✅ 完成 | 全部需求已实现 |
 | `idf.py build` 编译 | ✅ 通过 | 0 错误 0 警告 |
-| 主机单元测试 | ✅ 通过 | 4191 断言,0 失败(ctrl 1050 + LED 状态机 3141,细节见 §四) |
+| 主机单元测试 | ✅ 通过 | 4269 断言,0 失败(ctrl 1128 + LED 状态机 3141,细节见 §四) |
 | 首次刷写 + 启动日志抓取(COM4 实物) | ✅ 已做 | 75 s 启动日志;发现 2 个实机缺陷(见 §4.3) |
 | 缺陷修复 + 事件重构固件刷写 | ✅ 已做 | BUG 1–4 全部修复并刷写;80 s 复验:单次启动无复位,完整走完启动状态机至 RUNNING(见 §4.3) |
 | RGB 状态灯改造(WS2812@GPIO48) | ✅ 刷写验证 | 启动日志确认 `WS2812 RGB LED ready: GPIO=48 brightness=64`;灯语目视待用户确认(见 §4.4) |
+| 风扇调速/测速(PWM@GPIO5 + TACH@GPIO6) | ✅ 刷写 + MQTT E2E | 命令→应答→遥测→堵转事件全链路实测通过(见 §4.6);**风扇本体尚未接线** |
 | 真实传感器/继电器/断电恢复等实测 | ⚠️ 部分 | **SHT40 已确认在位**(有效采样驱动迟滞加热);继电器安全初始化已见日志;断电恢复/SAFE_LOCKED 冒烟未做 |
-| MQTT 连接/联调 | 🟡 连接已建立 | 最新启动日志显示 Wi-Fi(`Xiaomi_35BF`)与 broker 均已连上(`connected to broker`,并完成时间同步);应用层命令/状态往返联调未做 |
+| MQTT 连接/联调 | 🟡 部分联调 | Wi-Fi(`Xiaomi_35BF`)与 broker 已连上;**风扇命令 E2E 已完成**(§4.6);温控命令往返联调未做 |
 
 **请勿将"编译通过 + 主机测试通过"理解为"已在硬件上验证"。**
 上板前建议先用 `idf.py -p <PORT> flash monitor` 做 §五 列出的冒烟检查。
@@ -32,7 +33,7 @@
 | 8 | 重启循环保护(快速复位→SAFE_LOCKED) | ✅ | `main/app_boot.c`(RTC 内存计数) |
 | 9 | 看门狗/健康监控分级升级(10s 停机→安全断开,60s→复位) | ✅ | `main/app_health.c` |
 | 10 | SoftAP Web 配网(失败兜底,不阻塞本地控制) | ✅ | `components/wifi_manager/wifi_manager.c` |
-| 11 | 主机单元测试 + `idf.py build` | ✅ | `tests/host/`(1038 断言通过) |
+| 11 | 主机单元测试 + `idf.py build` | ✅ | `tests/host/`(4277 断言通过) |
 | 12 | 文档:详细设计 + MQTT 协议 | ✅ | `docs/DESIGN.md`、`docs/MQTT_PROTOCOL.md` |
 
 ## 三、用户确认事项(已按确认值固化)
@@ -47,15 +48,25 @@
 | Flash 容量 / 分区布局 | 16MB / 单应用大分区 | `sdkconfig` + `partitions.csv`(app 16320KB) |
 | RGB 指示灯 | 板载 WS2812(单线数据)→ GPIO48,亮度 64 | `APP_LED_WS2812_GPIO=48`、`APP_LED_WS2812_BRIGHTNESS=64`;驱动 `espressif/led_strip` 3.1.1(RMT) |
 
+风扇接入设计默认值(**自动固化,待用户确认**;用户确认后如需变更改 Kconfig 重刷即可):
+
+| 事项 | 默认值 | 固化位置 |
+|------|--------|----------|
+| 风扇 PWM / TACH 引脚 | GPIO5 / GPIO6 | `APP_FAN_PWM_GPIO` / `APP_FAN_TACH_GPIO` |
+| 控制方式 | 仅手动 MQTT 调速,不与温控自动联动 | 设计决定(避免控制语义歧义) |
+| 风扇供电 | 外部 12 V(严禁从开发板取电) | 接线规范 |
+| 堵转阈值 / 遥测周期 | 3 s 无脉冲 / 5 s | `CTRL_FAN_STALL_MS`、`temperature_control.c` |
+| 占空比持久化 | 否(重启回默认 0%) | 设计决定 |
+
 ## 四、测试报告
 
 ### 4.1 主机单元测试(zig cc 编译,与固件同源 `ctrl_core` 代码)
 
 ```
-test_ctrl_logic   :  958 assertions passed, 0 failed
-test_ctrl_protocol:   92 assertions passed, 0 failed
+test_ctrl_logic   :  978 assertions passed, 0 failed
+test_ctrl_protocol:  158 assertions passed, 0 failed
 test_led_pattern  : 3141 assertions passed, 0 failed   (RGB 灯语引擎,对应灯语规范 §7)
-合计              : 4191 passed, 0 failed
+合计              : 4277 passed, 0 failed
 ```
 
 用例覆盖(任务书规则 32 的核心场景):
@@ -69,7 +80,7 @@ test_led_pattern  : 3141 assertions passed, 0 failed   (RGB 灯语引擎,对应�
 | 5 | 超温 40°C 保护及降温退出 | ✅ |
 | 6 | 手动模式强制开/关、与自动切换 | ✅ |
 | 7 | 手动过期(`expires_at`)自动退出 | ✅ |
-| 8 | 连续加热 30min 超时保护 + 10min 冷却重试 | ✅ |
+| 8 | 连续加热 2h 超时保护 + 10min 冷却重试 | ✅ |
 | 9 | SAFE_LOCKED 全面封锁,满足条件/运维解锁 | ✅ |
 | 10 | 从未有过有效样本 → 永不加热 | ✅ |
 | 11 | 统一载荷构建与字段顺序/格式(含 `humidity`/`sensor_status`) | ✅ |
@@ -81,6 +92,10 @@ test_led_pattern  : 3141 assertions passed, 0 failed   (RGB 灯语引擎,对应�
 | 17 | `heating`↔`relay_status` 一致性 | ✅ |
 | 18 | 过期规则:missing/clock_unsynced/expired/too_far/generic | ✅ |
 | 19 | 遥测扩展:湿度范围 [0,100] 校验、故障样本 `null`/`fault` 渲染 | ✅ |
+| 20 | 风扇状态判定:duty=0→`off`(惯性空转 3 s 宽限内)、超宽限持续旋转→`overrun`、rpm>0→`ok`、启动宽限、3 s 阈值→`stall` | ✅ |
+| 21 | 风扇载荷构建/回显(`fan/duty/rpm/status`,含越界与缓冲区不足拒绝) | ✅ |
+| 22 | 风扇主题索引与 `fan_topic_mismatch` 一致性 | ✅ |
+| 23 | 风扇命令解析:`bad_fan`/`bad_duty`/`bad_cmd_id`/`unknown_field` 等严格拒绝 | ✅ |
 | — | `no_action` 空动作拒绝 | ✅ |
 
 测试命令(可复现,三套)见 [README](../README.md)「主机单元测试」。
@@ -89,7 +104,7 @@ test_led_pattern  : 3141 assertions passed, 0 failed   (RGB 灯语引擎,对应�
 
 ```
 idf.py build → Project build complete
-app 二进制: 1,023,984 字节(0xF9FF0,约 1000 KB),app 分区 16320KB(0xFF0000)余 94%
+app 二进制: 1,043,760 字节(0xFED30,约 1019 KB),app 分区 16320KB(0xFF0000)余 94%
 bootloader: 0x5280 字节,余 36%
 分区表: 自定义 partitions.csv(nvs 24K @0x9000 + factory 16320K @0x10000)
 编译告警: 0(全组件 -Werror 通过)
@@ -151,6 +166,58 @@ SHT40 实测在位(初始读数短暂无效→FAULT_SENSOR→3 个有效样本�
   启动初期(471 ms)一次 `ESP_ERR_INVALID_RESPONSE` 失败采样,MQTT 尚未连接故无故障遥测可见,
   随后自愈;故障遥测路径(`sensor_status":"fault"`,`null` 测量值)由主机测试覆盖。
 
+### 4.6 风扇调速/测速接入(刷写 + MQTT 端到端实测)
+
+- **实现**:`components/fan_ctrl/`(LEDC 25 kHz 10-bit PWM @GPIO5 + PCNT 转速计数 @GPIO6,
+  1 s 测速窗口,2 脉冲/转);状态判定 `off/ok/stall` 在纯 C 层 `ctrl_fan_status_eval()`;
+  集成于 `temperature_control.c`(遥测 5 s + 变化即发、命令路由、堵转事件)。
+  IDF v6.1 的 PCNT API 为 `pcnt_*` 前缀(与 5.x 文档的 `pulse_cnt_*` 不同),
+  毛刺滤波经 `pcnt_unit_set_glitch_filter()` 单独配置,已适配。
+- **主机测试**:`test_ctrl_logic` +14、`test_ctrl_protocol` +64 断言(状态判定、
+  载荷构建、主题索引、命令严格校验),合计 4191 → **4269** 断言全绿。
+- **实机验证(COM4 刷写后)**:
+  1. 启动日志:`风扇PWM已初始化: GPIO5, 25000Hz, 10-bit`、`风扇测速已初始化: GPIO6,
+     2脉冲/转, 1s窗口`、订阅 `fans/0/command`,discovery 含 `fans` 能力段;
+  2. **MQTT E2E**(自研原始 socket 客户端,发布 + 订阅同时抓包):
+     - 发布 `{"fan":0,"duty":50,"cmd_id":"e2e-fan-1"}` → 应答
+       `{"fan":0,"result":"applied","err_code":"ok","cmd_id":"e2e-fan-1"}`;
+     - 遥测立即回显 `{"fan":0,"duty":50,"rpm":0,"status":"ok"}`;
+     - 3 s 后(风扇本体未接线,rpm 恒 0)正确判定堵转:边沿事件
+       `{"event":"fan_stall","device_id":"...","fan":0,"duty":50,"rpm":0}` 发布一次,
+       遥测转为 `"status":"stall"` 且持续周期上报、事件不重发;
+     - discovery retained 载荷确认含 `fans:[{"index":0,"pwm_freq_hz":25000,...}]`
+       与 `fan_telemetry/fan_command/fan_command_result` 主题映射。
+  - 结论:**调速、测速框架、堵转在线监测、MQTT 协议全链路已实机验证**;
+    实际转速测量(RPM>0)待风扇本体接线后确认。
+
+### 4.7 风扇失控空转(overrun)状态修复
+
+- **问题**(实机反馈):风扇满速旋转,遥测仍报 `{"fan":0,"duty":0,"rpm":840,"status":"off"}`
+  ——duty=0 与持续 rpm>0 矛盾。原判定 `duty==0 → off` 不看 rpm,把持续异常旋转
+  掩盖成"正常停转";硬件层成因是 PWM 信号未生效(风扇满速证明 PWM 线未接/接错或
+  实为 3 线风扇),TACH 测速链路正常。
+- **改动**:`ctrl_fan_status_eval()` 新增第 4 种状态 `overrun`(duty=0 但持续 3 s
+  (`CTRL_FAN_SPINDOWN_MS`)以上 rpm>0,PWM 未生效);停机惯性余转 3 s 宽限内仍报
+  `off`。`fan_ctrl` 新增 `fan_ctrl_off_spin_ms()` 统计 duty=0 持续旋转时长,
+  占空比变化即清零;`temperature_control.c` 增加 `overrun` 边沿 ERROR 日志
+  (不发事件,协议 `status` 枚举扩为 `off/ok/stall/overrun`,**Python 服务端需
+  适配新枚举值**)。
+- **主机测试**:`test_ctrl_logic` +6、`test_ctrl_protocol` +2 断言(惯性宽限边界、
+  overrun 判定边界、载荷 `"status":"overrun"` 渲染),合计 4269 → **4277** 断言全绿。
+- **硬件排查指引**(软件无法代替正确接线):duty=0 仍满速旋转时检查
+  ① PWM 线(蓝)是否接 GPIO5;② 风扇是否为 4 线(3 线风扇仅测速无调速);
+  ③ PWM 输入悬空时部分风扇默认全速。详见风扇接入规范 §5。
+
+### 4.8 加热时长上限调整
+
+- **需求**:连续加热上限(`heat_max_ms`)与手动加热上限(`manual_max_ms`)
+  均调整为 **2 小时**(`2*60*60*1000` ms)。
+- **改动**:`ctrl_set_defaults()` 默认值 30min/15min → 2h/2h;
+  手动加热到期仍优雅回落 AUTO + 冷却(不计 `FAULT_TIMEOUT`);
+  连续加热满 2h 触发 `FAULT_TIMEOUT`,解除路径不变
+  (温度达 `stop` 或 `timeout_retry_ms=10min` 后转冷却 30s)。
+- **文档**:DESIGN、MQTT_PROTOCOL(`manual_max_s` 示例 900 → 7200)同步更新。
+
 ## 五、遗留事项与上板建议(未验证项)
 
 1. **硬件冒烟清单**(上板后逐项):
@@ -164,7 +231,13 @@ SHT40 实测在位(初始读数短暂无效→FAULT_SENSOR→3 个有效样本�
    本设计把重活放在独立任务,尚未在实机确认余量,若上板栈溢出复位可调至 8192。
 3. 触点粘连检测:无反馈硬件,`relay_status` 语义为"指令状态"
    (`semantics:"commanded_state"`,已在 discovery 声明);如需真实触点反馈需加检测电路。
-4. OTA、TLS/mqtt、多传感器扩展:任务书范围外,未实现。
+4. **风扇实物验证**(接线见 [风扇接入规范](specs/%23%20ESP32-S3%204线PWM风扇接入规范.md)):
+   - 按规范接线(12 V 外部供电 + 共地;TACH 10 kΩ 上拉**必须 3.3 V**);
+   - 发布 `{"fan":0,"duty":50}` 确认风扇起转,遥测 `rpm>0`、`status:"ok"`;
+   - 堵转告警路径已实机验证(未接线场景),接线后确认 `stall` 消失、恢复时无重复事件;
+   - **duty=0 时风扇不得持续满速旋转**:若仍满速,查 PWM 线(蓝)/风扇类型
+     (见规范 §5),此时遥测报 `overrun` 而非 `off`。
+5. OTA、TLS/mqtt、多传感器扩展:任务书范围外,未实现。
 
 ## 六、交付物清单
 
@@ -179,8 +252,10 @@ SHT40 实测在位(初始读数短暂无效→FAULT_SENSOR→3 个有效样本�
 │   ├── wifi_manager/        STA+退避 / SoftAP 配网(只发事件)
 │   ├── mqtt_manager/        MQTT+LWT+发布泵+单一重连所有者
 │   ├── device_manager/      DEVICE_READY/SYSTEM_ERROR 广播 + SNTP
+│   ├── fan_ctrl/            4 线 PWM 风扇(LEDC 调速 + PCNT 测速 + 堵转检测)
 │   └── led_status/          事件驱动状态灯
-├── tests/host/              主机单元测试(4191 断言)
+├── tests/host/              主机单元测试(4277 断言)
+├── docs/specs/              需求规范原文 + 4 线 PWM 风扇接入规范
 ├── partitions.csv           自定义分区表(16MB 单应用大分区)
 ├── sdkconfig.defaults       默认配置(flash 16MB + 自定义分区表)
 └── docs/

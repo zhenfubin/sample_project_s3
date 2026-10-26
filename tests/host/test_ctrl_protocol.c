@@ -203,6 +203,121 @@ static void test_no_action(void)
     parse_fails("{\"sensor\":0}", 0, "no_action");
 }
 
+/* ---- 4线 PWM 风扇协议测试 ---- */
+
+static bool fan_parse_ok(const char *json, int topic_fan, ctrl_fan_cmd_t *out)
+{
+    char err[64] = {0};
+    bool ok = ctrl_fan_cmd_parse(json, (int)strlen(json), topic_fan, out, err, sizeof(err));
+    if (!ok) {
+        printf("  (rejected: %s)\n", err);
+    }
+    return ok;
+}
+
+static void fan_parse_fails(const char *json, int topic_fan, const char *want_reason)
+{
+    ctrl_fan_cmd_t fcmd;
+    char err[64] = {0};
+    bool ok = ctrl_fan_cmd_parse(json, (int)strlen(json), topic_fan, &fcmd, err, sizeof(err));
+    CHECK(!ok);
+    CHECK_EQ_STR(err, want_reason);
+}
+
+static void test_fan_payload_build(void)
+{
+    char buf[128];
+
+    int n = ctrl_fan_payload_build(buf, sizeof(buf), 0, 80, 1250, FAN_STATUS_OK);
+    CHECK(n > 0);
+    CHECK_EQ_STR(buf, "{\"fan\":0,\"duty\":80,\"rpm\":1250,\"status\":\"ok\"}");
+
+    n = ctrl_fan_payload_build(buf, sizeof(buf), 1, 0, 0, FAN_STATUS_OFF);
+    CHECK(n > 0);
+    CHECK_EQ_STR(buf, "{\"fan\":1,\"duty\":0,\"rpm\":0,\"status\":\"off\"}");
+
+    n = ctrl_fan_payload_build(buf, sizeof(buf), 0, 50, 0, FAN_STATUS_STALL);
+    CHECK(n > 0);
+    CHECK_EQ_STR(buf, "{\"fan\":0,\"duty\":50,\"rpm\":0,\"status\":\"stall\"}");
+
+    /* duty=0 但持续旋转:失控空转,状态为 overrun(不得报 off)。 */
+    n = ctrl_fan_payload_build(buf, sizeof(buf), 0, 0, 840, FAN_STATUS_OVERRUN);
+    CHECK(n > 0);
+    CHECK_EQ_STR(buf, "{\"fan\":0,\"duty\":0,\"rpm\":840,\"status\":\"overrun\"}");
+
+    /* 非法参数与过小缓冲必须拒绝而非截断发布。 */
+    CHECK(ctrl_fan_payload_build(buf, sizeof(buf), 0, 101, 0, FAN_STATUS_OFF) < 0);
+    CHECK(ctrl_fan_payload_build(buf, sizeof(buf), -1, 50, 0, FAN_STATUS_OK) < 0);
+    CHECK(ctrl_fan_payload_build(buf, sizeof(buf), 32, 50, 0, FAN_STATUS_OK) < 0);
+    CHECK(ctrl_fan_payload_build(buf, 4, 0, 50, 0, FAN_STATUS_OK) < 0);
+    CHECK(ctrl_fan_payload_build(NULL, 128, 0, 50, 0, FAN_STATUS_OK) < 0);
+}
+
+static void test_fan_topic_index(void)
+{
+    CHECK(ctrl_topic_fan_index("devices/d1/fans/0/command") == 0);
+    CHECK(ctrl_topic_fan_index("devices/d1/fans/3/telemetry") == 3);
+    CHECK(ctrl_topic_fan_index("devices/d1/fans/01/command") == 1);
+    CHECK(ctrl_topic_fan_index("devices/d1/sensors/0/command") == -1);
+    CHECK(ctrl_topic_fan_index("devices/d1/fans//command") == -1);
+    CHECK(ctrl_topic_fan_index("devices/d1/fans/3x/command") == -1);
+    CHECK(ctrl_topic_fan_index(NULL) == -1);
+}
+
+static void test_fan_cmd_parse(void)
+{
+    ctrl_fan_cmd_t fcmd;
+
+    /* 合法命令:fans/0 + duty 50。 */
+    CHECK(fan_parse_ok("{\"fan\":0,\"duty\":50}", 0, &fcmd));
+    CHECK(fcmd.fan == 0);
+    CHECK(fcmd.duty == 50);
+    CHECK(fcmd.cmd_id[0] == '\0');
+
+    /* 带 cmd_id;duty=0 停转合法。 */
+    CHECK(fan_parse_ok("{\"fan\":2,\"duty\":0,\"cmd_id\":\"f-1\"}", 2, &fcmd));
+    CHECK(fcmd.fan == 2);
+    CHECK(fcmd.duty == 0);
+    CHECK_EQ_STR(fcmd.cmd_id, "f-1");
+
+    /* topic_fan=-1(无主题上下文)不做匹配校验。 */
+    CHECK(fan_parse_ok("{\"fan\":3,\"duty\":100}", -1, &fcmd));
+    CHECK(fcmd.duty == 100);
+
+    /* 载荷结构错误。 */
+    fan_parse_fails("", 0, "empty_payload");
+    fan_parse_fails("{", 0, "malformed_json");
+    fan_parse_fails("[1]", 0, "not_object");
+    fan_parse_fails("{\"fan\":0,\"duty\":50,\"x\":1}", 0, "unknown_field");
+
+    /* fan 字段:必填、整数、0-31。 */
+    fan_parse_fails("{\"duty\":50}", 0, "bad_fan");
+    fan_parse_fails("{\"fan\":\"0\",\"duty\":50}", 0, "bad_fan");
+    fan_parse_fails("{\"fan\":true,\"duty\":50}", 0, "bad_fan");
+    fan_parse_fails("{\"fan\":32,\"duty\":50}", 0, "bad_fan");
+    fan_parse_fails("{\"fan\":-1,\"duty\":50}", 0, "bad_fan");
+    fan_parse_fails("{\"fan\":1.5,\"duty\":50}", 0, "bad_fan");
+
+    /* 载荷 fan 必须与主题编号一致。 */
+    fan_parse_fails("{\"fan\":0,\"duty\":50}", 1, "fan_topic_mismatch");
+
+    /* duty 字段:必填、整数、0-100。 */
+    fan_parse_fails("{\"fan\":0}", 0, "bad_duty");
+    fan_parse_fails("{\"fan\":0,\"duty\":101}", 0, "bad_duty");
+    fan_parse_fails("{\"fan\":0,\"duty\":-1}", 0, "bad_duty");
+    fan_parse_fails("{\"fan\":0,\"duty\":\"50\"}", 0, "bad_duty");
+    fan_parse_fails("{\"fan\":0,\"duty\":12.5}", 0, "bad_duty");
+
+    /* cmd_id 可选,但必须是短字符串。 */
+    fan_parse_fails("{\"fan\":0,\"duty\":50,\"cmd_id\":123}", 0, "bad_cmd_id");
+    char long_id[80];
+    memset(long_id, 'a', 48);
+    long_id[48] = '\0'; /* 48 字符无法放入 cmd_id[48](需含结尾符) */
+    char json[160];
+    snprintf(json, sizeof(json), "{\"fan\":0,\"duty\":50,\"cmd_id\":\"%s\"}", long_id);
+    fan_parse_fails(json, 0, "bad_cmd_id");
+}
+
 int main(void)
 {
     test_payload_build();
@@ -214,5 +329,8 @@ int main(void)
     test_heating_relay_consistency();
     test_expiry_rules();
     test_no_action();
+    test_fan_payload_build();
+    test_fan_topic_index();
+    test_fan_cmd_parse();
     TEST_REPORT("ctrl_protocol");
 }

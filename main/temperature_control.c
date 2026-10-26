@@ -25,6 +25,7 @@
 #include "freertos/task.h"
 #include "event_manager.h"
 #include "device_manager.h"
+#include "fan_ctrl.h"
 #include "led_status.h"
 #include "mqtt_manager.h"
 #include "relay.h"
@@ -56,11 +57,44 @@ static struct {
     bool mqtt_was_connected;        /* 上一轮 MQTT 连接标志(重连边沿检测) */
     char cmd_id_cache[CMD_ID_CACHE_LEN][48]; /* 命令去重 cmd_id 环形缓存 */
     unsigned cmd_id_next;           /* 去重缓存写入游标 */
+    bool fan_enabled;               /* 风扇驱动是否初始化成功 */
+    uint32_t fan_last_pub_ms;       /* 上次风扇遥测发布时刻(ms) */
+    uint8_t fan_last_pub_duty;      /* 上次风扇遥测的占空比(变化检测) */
+    int fan_last_pub_status;        /* 上次风扇遥测状态(fan_status_t,变化检测) */
+    bool fan_stall_reported;        /* 当前堵转是否已报事件(边沿触发) */
+    bool fan_overrun_logged;        /* 当前失控空转是否已打日志(边沿触发) */
+    ctrl_prot_t last_prot;          /* 上一轮保护状态(变更边沿检测,串口日志用) */
 } s_app;
 
 static uint32_t now_ms(void)
 {
     return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* 保护状态中文名(串口日志用;MQTT state 字段仍用 ctrl_prot_str 英文枚举) */
+static const char *prot_cn_str(ctrl_prot_t p)
+{
+    switch (p) {
+    case CTRL_PROT_NONE:           return "无";
+    case CTRL_PROT_COOLDOWN:       return "冷却中";
+    case CTRL_PROT_FAULT_SENSOR:   return "传感器故障锁";
+    case CTRL_PROT_FAULT_OVERTEMP: return "超温保护锁";
+    case CTRL_PROT_FAULT_TIMEOUT:  return "加热超时锁";
+    case CTRL_PROT_SAFE_LOCKED:    return "安全锁定";
+    default:                       return "未知";
+    }
+}
+
+/* 保护状态变更串口日志:进入保护用 W/E 告警,解除保护用 I */
+static void log_prot_change(ctrl_prot_t from, ctrl_prot_t to)
+{
+    if (to == CTRL_PROT_NONE) {
+        ESP_LOGI(TAG, "保护状态解除: %s -> 无(恢复正常控制)", prot_cn_str(from));
+    } else if (to == CTRL_PROT_COOLDOWN) {
+        ESP_LOGW(TAG, "保护状态进入: %s -> 冷却中(禁止加热)", prot_cn_str(from));
+    } else {
+        ESP_LOGE(TAG, "保护状态进入: %s -> %s(禁止加热)", prot_cn_str(from), prot_cn_str(to));
+    }
 }
 
 /* 主题拼装统一使用 mqtt_manager 的 mqtt_mgr_make_topic()(带截断检测) */
@@ -126,17 +160,31 @@ static void publish_config(void)
 static void publish_discovery(void)
 {
     char topic[MQTT_TOPIC_MAX];
-    char payload[1024];
+    char payload[1280];
+    char fans_sec[160];
     mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/discovery", s_app.dev_id);
+    /* fans 能力块:风扇启用时列出能力,禁用时为空数组 */
+    if (s_app.fan_enabled) {
+        snprintf(fans_sec, sizeof(fans_sec),
+                 "[{\"index\":%d,\"pwm_freq_hz\":25000,\"duty_unit\":\"percent\","
+                 "\"rpm_unit\":\"rpm\",\"tach_pulses_per_rev\":2}]",
+                 s_app.cfg.fan_index);
+    } else {
+        snprintf(fans_sec, sizeof(fans_sec), "[]");
+    }
     snprintf(payload, sizeof(payload),
              "{\"device_id\":\"%s\",\"firmware\":\"%s\",\"platform\":\"esp32s3\","
              "\"sensors\":[{\"index\":%d,\"driver\":\"sht40\",\"unit\":\"celsius\","
              "\"humidity_unit\":\"percent\",\"sample_period_s\":%.1f}],"
              "\"actuator\":{\"type\":\"relay\",\"gpio\":%d,"
              "\"semantics\":\"commanded_state\"},"
+             "\"fans\":%s,"
              "\"topics\":{\"telemetry\":\"devices/%s/sensors/%d/telemetry\","
              "\"command\":\"devices/%s/sensors/%d/command\","
              "\"command_result\":\"devices/%s/sensors/%d/command_result\","
+             "\"fan_telemetry\":\"devices/%s/fans/%d/telemetry\","
+             "\"fan_command\":\"devices/%s/fans/%d/command\","
+             "\"fan_command_result\":\"devices/%s/fans/%d/command_result\","
              "\"state\":\"devices/%s/state\",\"config\":\"devices/%s/config\","
              "\"availability\":\"devices/%s/availability\"}}",
              s_app.dev_id, "1.0.0", s_app.cfg.sensor_index,
@@ -146,8 +194,10 @@ static void publish_discovery(void)
 #else
              -1,
 #endif
-             s_app.dev_id, s_app.cfg.sensor_index, s_app.dev_id, s_app.cfg.sensor_index,
-             s_app.dev_id, s_app.cfg.sensor_index, s_app.dev_id, s_app.dev_id, s_app.dev_id);
+             fans_sec, s_app.dev_id, s_app.cfg.sensor_index, s_app.dev_id, s_app.cfg.sensor_index,
+             s_app.dev_id, s_app.cfg.sensor_index, s_app.dev_id, s_app.cfg.fan_index, s_app.dev_id,
+             s_app.cfg.fan_index, s_app.dev_id, s_app.cfg.fan_index, s_app.dev_id, s_app.dev_id,
+             s_app.dev_id);
     mqtt_manager_publish(topic, payload, 1, true);
 }
 
@@ -168,6 +218,48 @@ static void publish_cmd_result(const ctrl_cmd_t *cmd, const char *result, const 
     mqtt_manager_publish(topic, payload, 1, false);
 }
 
+/* 风扇遥测:fans/<n>/telemetry,QoS0 非 retained。
+ * 状态由 ctrl_fan_status_eval() 判定;发布后记录占空比/状态用于变化检测 */
+static void publish_fan_telemetry(void)
+{
+    char topic[MQTT_TOPIC_MAX];
+    char payload[128];
+    uint8_t duty = fan_ctrl_get_duty();
+    uint32_t rpm = fan_ctrl_get_rpm();
+    fan_status_t st = ctrl_fan_status_eval(duty, rpm, fan_ctrl_rpm_zero_ms(),
+                                           fan_ctrl_off_spin_ms(), CTRL_FAN_STALL_MS,
+                                           CTRL_FAN_SPINDOWN_MS);
+    if (mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/fans/%d/telemetry", s_app.dev_id,
+                            s_app.cfg.fan_index) < 0) {
+        return;
+    }
+    if (ctrl_fan_payload_build(payload, sizeof(payload), s_app.cfg.fan_index, duty, rpm, st) < 0) {
+        ESP_LOGE(TAG, "fan telemetry payload build failed, not sent");
+        return;
+    }
+    mqtt_manager_publish(topic, payload, 0, false);
+    s_app.fan_last_pub_ms = now_ms();
+    s_app.fan_last_pub_duty = duty;
+    s_app.fan_last_pub_status = (int)st;
+}
+
+/* 风扇命令结果:fans/<n>/command_result,QoS1 非 retained(与传感器 command_result 对称) */
+static void publish_fan_cmd_result(const ctrl_fan_cmd_t *fcmd, int fan, const char *result,
+                                   const char *err_code)
+{
+    char topic[MQTT_TOPIC_MAX];
+    char payload[192];
+    if (mqtt_mgr_make_topic(topic, sizeof(topic), "devices/%s/fans/%d/command_result",
+                            s_app.dev_id, fan) < 0) {
+        return;
+    }
+    snprintf(payload, sizeof(payload),
+             "{\"fan\":%d,\"result\":\"%s\",\"err_code\":\"%s\",\"cmd_id\":\"%s\"}",
+             fan, result, err_code ? err_code : "",
+             fcmd && fcmd->cmd_id[0] ? fcmd->cmd_id : "");
+    mqtt_manager_publish(topic, payload, 1, false);
+}
+
 static bool cmd_id_seen(const char *cmd_id)
 {
     if (cmd_id == NULL || cmd_id[0] == '\0') {
@@ -182,6 +274,36 @@ static bool cmd_id_seen(const char *cmd_id)
              sizeof(s_app.cmd_id_cache[0]), "%s", cmd_id);
     s_app.cmd_id_next++;
     return false;
+}
+
+/* 风扇命令处理:fans/<n>/command(仅占空比直控,无过期时间语义) */
+static void process_fan_command(const app_event_mqtt_msg_t *msg, int topic_fan)
+{
+    ctrl_fan_cmd_t fcmd;
+    char err[32] = {0};
+
+    if (!ctrl_fan_cmd_parse(msg->payload, msg->len, topic_fan, &fcmd, err, sizeof(err))) {
+        ESP_LOGW(TAG, "风扇命令被拒绝: %s (topic=%s)", err, msg->topic);
+        publish_fan_cmd_result(NULL, topic_fan, ctrl_cmd_result_str(CTRL_CMD_RES_REJECTED), err);
+        return;
+    }
+    if (cmd_id_seen(fcmd.cmd_id)) {
+        ESP_LOGI(TAG, "重复风扇命令已跳过: cmd_id=%s", fcmd.cmd_id);
+        publish_fan_cmd_result(&fcmd, fcmd.fan, ctrl_cmd_result_str(CTRL_CMD_RES_DUPLICATE),
+                               "seen");
+        return;
+    }
+    ESP_LOGI(TAG, "收到风扇命令: fan=%d duty=%d%% cmd_id=%s", fcmd.fan, fcmd.duty, fcmd.cmd_id);
+    esp_err_t serr = fan_ctrl_set_duty(fcmd.duty);
+    if (serr != ESP_OK) {
+        ESP_LOGW(TAG, "风扇占空比设置失败: %s", esp_err_to_name(serr));
+        publish_fan_cmd_result(&fcmd, fcmd.fan, ctrl_cmd_result_str(CTRL_CMD_RES_REJECTED),
+                               serr == ESP_ERR_INVALID_STATE ? "pwm_disabled" : "failed");
+        return;
+    }
+    ESP_LOGI(TAG, "风扇PWM已设置: fan=%d duty=%d%%", fcmd.fan, fcmd.duty);
+    publish_fan_cmd_result(&fcmd, fcmd.fan, ctrl_cmd_result_str(CTRL_CMD_RES_APPLIED), "ok");
+    publish_fan_telemetry(); /* 命令成功立即上报一次风扇遥测 */
 }
 
 /* Returns NULL on success, otherwise a short reason. */
@@ -218,6 +340,13 @@ static void process_commands(uint32_t t)
 {
     app_event_mqtt_msg_t msg;
     while (xQueueReceive(s_app.cmds, &msg, 0) == pdTRUE) {
+        /* 风扇命令主题优先路由(fans/<n>/command),不得落入传感器命令路径 */
+        int topic_fan = ctrl_topic_fan_index(msg.topic);
+        if (topic_fan >= 0) {
+            process_fan_command(&msg, topic_fan);
+            continue;
+        }
+
         ctrl_cmd_t cmd;
         char err[32] = {0};
         int topic_sensor = ctrl_topic_sensor_index(msg.topic);
@@ -326,8 +455,14 @@ static void control_task(void *arg)
         ctrl_tick(&s_app.st, t);
         apply_output();
 
-        /* Status LED (spec: only state pushes here; the LED task owns GPIOs). */
+        /* 保护状态变更串口日志(1s 轮询边沿检测,覆盖 tick/命令/紧急停机全部路径) */
         ctrl_prot_t prot = ctrl_prot(&s_app.st);
+        if (prot != s_app.last_prot) {
+            log_prot_change(s_app.last_prot, prot);
+            s_app.last_prot = prot;
+        }
+
+        /* Status LED (spec: only state pushes here; the LED task owns GPIOs). */
         led_status_set_fault(prot != CTRL_PROT_NONE && prot != CTRL_PROT_COOLDOWN);
         led_status_set_control_active(s_app.st.heating);
 
@@ -338,6 +473,43 @@ static void control_task(void *arg)
             publish_state("reconnect");
         }
         s_app.mqtt_was_connected = mqtt_up;
+
+        /* ---- 风扇在线监测与遥测(1s 评估节奏) ---- */
+        if (s_app.fan_enabled) {
+            uint8_t fduty = fan_ctrl_get_duty();
+            uint32_t frpm = fan_ctrl_get_rpm();
+            fan_status_t fst = ctrl_fan_status_eval(fduty, frpm, fan_ctrl_rpm_zero_ms(),
+                                                    fan_ctrl_off_spin_ms(), CTRL_FAN_STALL_MS,
+                                                    CTRL_FAN_SPINDOWN_MS);
+
+            /* 堵转边沿事件:一次堵转仅上报一次,恢复只体现在遥测 */
+            if (fst == FAN_STATUS_STALL && !s_app.fan_stall_reported) {
+                s_app.fan_stall_reported = true;
+                ESP_LOGE(TAG, "风扇堵转: fan=%d duty=%d%% rpm=%lu", s_app.cfg.fan_index, fduty,
+                         (unsigned long)frpm);
+                device_manager_report_fan_stall(s_app.cfg.fan_index, fduty, (int)frpm);
+            } else if (fst != FAN_STATUS_STALL) {
+                s_app.fan_stall_reported = false;
+            }
+
+            /* 失控空转边沿日志:duty=0 却持续旋转,PWM 未生效(接线/风扇类型问题) */
+            if (fst == FAN_STATUS_OVERRUN && !s_app.fan_overrun_logged) {
+                s_app.fan_overrun_logged = true;
+                ESP_LOGE(TAG,
+                         "风扇失控空转: fan=%d duty=0%% 但 rpm=%lu 持续 >%ums(PWM 信号未生效,"
+                         "检查 PWM 线/风扇是否为 3 线)",
+                         s_app.cfg.fan_index, (unsigned long)frpm,
+                         (unsigned)CTRL_FAN_SPINDOWN_MS);
+            } else if (fst != FAN_STATUS_OVERRUN) {
+                s_app.fan_overrun_logged = false;
+            }
+
+            /* 遥测:5s 周期,或占空比/状态变化立即上报(rpm 波动不触发) */
+            bool changed = fduty != s_app.fan_last_pub_duty || (int)fst != s_app.fan_last_pub_status;
+            if (mqtt_up && (changed || (t - s_app.fan_last_pub_ms) >= 5000)) {
+                publish_fan_telemetry();
+            }
+        }
 
         if (mqtt_up && (t - last_state_pub) > 30000) {
             publish_state("periodic");
@@ -377,6 +549,27 @@ esp_err_t temperature_control_start(const temperature_control_cfg_t *cfg)
     if (cfg->start_safe_locked) {
         ctrl_enter_safe_locked(&s_app.st, now_ms());
         ESP_LOGW(TAG, "started in SAFE_LOCKED (restart guard lockout)");
+    }
+    /* 初始保护状态打印(此后变更由控制任务边沿日志跟踪) */
+    s_app.last_prot = ctrl_prot(&s_app.st);
+    ESP_LOGI(TAG, "初始保护状态: %s", prot_cn_str(s_app.last_prot));
+
+    /* ---- 4线 PWM 风扇驱动(PWM 调速 + 转速测量) ---- */
+    if (cfg->fan_pwm_gpio >= 0 || cfg->fan_tach_gpio >= 0) {
+        fan_ctrl_config_t fcfg = {
+            .pwm_gpio = cfg->fan_pwm_gpio,
+            .tach_gpio = cfg->fan_tach_gpio,
+            .pwm_freq_hz = 25000,
+            .tach_pulses_per_rev = 2,
+            .initial_duty_pct = cfg->fan_default_duty,
+        };
+        s_app.fan_enabled = (fan_ctrl_init(&fcfg) == ESP_OK);
+    }
+    if (s_app.fan_enabled) {
+        ESP_LOGI(TAG, "风扇已启用: PWM=GPIO%d TACH=GPIO%d 初始占空比=%d%%", cfg->fan_pwm_gpio,
+                 cfg->fan_tach_gpio, cfg->fan_default_duty);
+    } else {
+        ESP_LOGW(TAG, "风扇未启用(调速 GPIO=%d 测速 GPIO=%d)", cfg->fan_pwm_gpio, cfg->fan_tach_gpio);
     }
 
     s_app.samples = xQueueCreate(SAMPLE_QUEUE_LEN, sizeof(sample_msg_t));

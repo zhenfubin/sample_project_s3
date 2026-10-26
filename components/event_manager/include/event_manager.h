@@ -32,6 +32,7 @@ typedef enum {
     APP_EVENT_MQTT_MESSAGE,
     APP_EVENT_DEVICE_READY,
     APP_EVENT_SYSTEM_ERROR,
+    APP_EVENT_FAN_STALL,
     APP_EVENT_ID_MAX,
 } app_event_id_t;
 
@@ -53,6 +54,13 @@ typedef struct {
     int err;
     char source[16];
 } app_event_error_t;
+
+/* Payload of APP_EVENT_FAN_STALL(风扇堵转,边沿触发:一次堵转只发一次)。 */
+typedef struct {
+    int fan;  /* 风扇编号 */
+    int duty; /* 当前占空比(%) */
+    int rpm;  /* 当前转速(rpm),堵转时为 0 */
+} app_event_fan_t;
 
 typedef struct {
     int64_t t_ms;     /* esp_timer ms since boot */

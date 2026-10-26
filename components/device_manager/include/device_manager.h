@@ -40,6 +40,18 @@ void device_manager_set_local_ready(void);
  */
 void device_manager_report_error(int err, const char *source);
 
+/**
+ * @brief Report a fan stall (fan spinning command but tach shows 0 rpm).
+ *
+ * Posts APP_EVENT_FAN_STALL and queues a broadcast on
+ * devices/{id}/events as {"event":"fan_stall",...} (QoS1, non-retained).
+ *
+ * @param fan   fan index
+ * @param duty  current duty percent
+ * @param rpm   current rpm (0 at stall)
+ */
+void device_manager_report_fan_stall(int fan, int duty, int rpm);
+
 /** @brief True once SNTP has delivered a plausible wall-clock time. */
 bool device_time_synced(void);
 

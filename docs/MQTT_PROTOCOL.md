@@ -11,15 +11,18 @@
 | `devices/{dev}/sensors/{n}/telemetry` | 上行 | 0 | 否 | 传感器遥测(温湿度+状态),每次采样一条 |
 | `devices/{dev}/sensors/{n}/command` | 下行 | 0/1 | 否(建议) | 控制命令(严格校验) |
 | `devices/{dev}/sensors/{n}/command_result` | 上行 | 1 | 否 | 命令执行结果 |
+| `devices/{dev}/fans/{n}/telemetry` | 上行 | 0 | 否 | 风扇遥测(占空比/转速/状态),5 s 周期或变化时 |
+| `devices/{dev}/fans/{n}/command` | 下行 | 0/1 | 否(建议) | 风扇调速命令(严格校验) |
+| `devices/{dev}/fans/{n}/command_result` | 上行 | 1 | 否 | 风扇命令执行结果 |
 | `devices/{dev}/state` | 上行 | 1 | 是 | 设备整体状态(含保护/原因) |
 | `devices/{dev}/config` | 上行 | 1 | 是 | 当前生效配置 |
 | `devices/{dev}/availability` | 上行 | 1 | 是 | `online` / `offline`(LWT) |
 | `devices/{dev}/discovery` | 上行 | 1 | 是 | 发现/能力声明(幂等) |
-| `devices/{dev}/events` | 上行 | 1 | 否 | 统一设备事件,`event` 字段:`device_ready` / `system_error` |
+| `devices/{dev}/events` | 上行 | 1 | 否 | 统一设备事件,`event` 字段:`device_ready` / `system_error` / `fan_stall` |
 
-**命令主题与遥测主题严格分离**;`command` 的主题尾段索引必须与载荷 `sensor` 字段一致。
-设备订阅精确主题 `devices/{dev}/sensors/0/command`(传感器索引固定 0,不使用 `+` 通配符);
-设备级 `devices/{dev}/command` 不订阅、不支持。
+**命令主题与遥测主题严格分离**;`command` 的主题尾段索引必须与载荷 `sensor`(或 `fan`)字段一致。
+设备订阅精确主题 `devices/{dev}/sensors/0/command` 与 `devices/{dev}/fans/0/command`
+(索引固定 0,不使用 `+` 通配符);设备级 `devices/{dev}/command` 不订阅、不支持。
 
 ## 2. 统一 JSON 载荷
 
@@ -56,6 +59,26 @@
 - `humidity` 与 `sensor_status` 为**遥测上报字段**:命令载荷不得携带,出现即按 `unknown_field` 拒绝;
 - 遥测中的 `start`/`stop` 是**当前生效阈值**(含应用后的回显)。
 
+### 2.1 风扇载荷(`fans/{n}/*` 专用)
+
+风扇主题**不使用**上述传感器字段集,采用独立精简载荷(未知字段同样拒绝):
+
+```json
+{"fan": 0, "duty": 50, "rpm": 1250, "status": "ok"}
+```
+
+| 字段 | 类型 | 约束 |
+|------|------|------|
+| `fan` | 整数 | 0..31,必须等于主题尾段索引(命令载荷必填) |
+| `duty` | 整数 | PWM 占空比 %,∈ [0, 100] |
+| `rpm` | 整数 | 实测转速(仅遥测;命令载荷不得携带) |
+| `status` | 字符串 | `off` / `ok` / `stall` / `overrun`(仅遥测) |
+
+`status` 语义:`off` = 占空比 0(停转为预期,含停机惯性余转宽限期内);
+`ok` = 正常运转(含启动宽限期);`stall` = 占空比 >0 且持续 3 s 无转速脉冲,
+判定堵转/未接;`overrun` = 失控空转——占空比 0 但持续 3 s 以上仍有转速,
+说明 PWM 信号未生效(接线/风扇类型问题),**不会**再谎报 `off`。
+
 ## 3. 遥测(telemetry)
 
 每次采样(2 s 周期)发布一条,QoS0、不 retained,携带温湿度测量值与传感器状态:
@@ -77,6 +100,17 @@
 {"sensor":0,"celsius":null,"humidity":null,"sensor_status":"fault",
  "heating":false,"relay_status":"off","start":35.0,"stop":37.0,"mode":"auto"}
 ```
+
+### 3.1 风扇遥测(`fans/{n}/telemetry`)
+
+5 s 周期发布,占空比或状态变化时立即补发一条(QoS0、不 retained;
+rpm 波动不触发,避免无刷风转动噪声):
+
+```json
+{"fan":0,"duty":50,"rpm":1250,"status":"ok"}
+```
+
+调速命令成功后会立即发布一条新遥测(回显生效值)。未启用风扇功能时该主题无任何消息。
 
 ## 4. 命令(command)
 
@@ -135,6 +169,31 @@
 {"sensor":0,"mode":"auto","cmd_id":"c-2024-004"}
 ```
 
+### 4.3 风扇命令(`fans/{n}/command`)
+
+手动调速命令,载荷必填 `fan` + `duty`(均为整数):
+
+```json
+{"fan":0,"duty":50,"cmd_id":"f-2024-001"}
+```
+
+校验规则与错误码(应答见 §5):
+
+| 错误码 | 触发条件 |
+|--------|----------|
+| `malformed_json` / `not_object` / `unknown_field` | 非 JSON / 非对象 / 出现 `rpm`、`status` 等未定义字段 |
+| `bad_fan` | `fan` 缺失、非整数或越界(0..31) |
+| `fan_topic_mismatch` | `fan` 与主题尾段索引不一致 |
+| `bad_duty` | `duty` 缺失、非整数或越界(0..100) |
+| `bad_cmd_id` | `cmd_id` 非字符串或 ≥48 字节 |
+| `pwm_disabled` | 编译未启用风扇(Kconfig 引脚为 -1) |
+| `duplicate` | `cmd_id` 重复(不重复执行) |
+
+- **手动调速,无自动温控联动**:不随温度自动变速,避免控制语义歧义;
+- `duty=0` 合法(停扇),此时状态为 `off`(停机惯性余转在 3 s 宽限期内仍报 `off`;
+  宽限期后仍持续旋转则报 `overrun`,见 §2.1);
+- 占空比**不持久化**:重启后恢复 Kconfig 初始值(默认 0%)。
+
 ## 5. 命令结果(command_result)
 
 每条命令必有一条应答(QoS1、不 retained):
@@ -148,6 +207,15 @@
 - `reason`:`ok` 或具体拒绝原因(与 §4.1 错误码一致);
 - `type`:`set_thresholds` / `manual_on` / `manual_off` / `auto`(解析失败时为 `unknown`);
 - `start`/`stop`/`mode` 是执行后的**生效值**回显。
+
+风扇命令应答(`fans/{n}/command_result`,QoS1、不 retained):
+
+```json
+{"fan":0,"result":"applied","err_code":"ok","cmd_id":"f-2024-001"}
+```
+
+- `result`:`applied` / `rejected` / `duplicate`;
+- `err_code`:`ok` 或 §4.3 中的拒绝原因;`cmd_id` 无则为 `""`。
 
 ## 6. 设备状态(state,retained)
 
@@ -165,7 +233,7 @@
 
 ```json
 {"sensor":0,"start":35.0,"stop":37.0,"overtemp":40.0,
- "sample_period_s":2.0,"sensor_stale_s":8.0,"manual_max_s":900}
+ "sample_period_s":2.0,"sensor_stale_s":8.0,"manual_max_s":7200}
 ```
 
 ## 8. 可用性(availability,retained)
@@ -179,6 +247,14 @@
 每次 MQTT 重连后幂等发布,声明设备能力、传感器驱动、继电器语义
 (`"semantics":"commanded_state"`——**继电器语义为"指令状态"而非触点反馈**,
 无触点反馈硬件,故无法检测触点粘连)以及全部主题名。
+
+启用风扇时载荷含 `fans` 数组(声明 PWM 频率、占空比/转速单位、每转脉冲数),
+`topics` 映射中含 `fan_telemetry` / `fan_command` / `fan_command_result`:
+
+```json
+{"fans":[{"index":0,"pwm_freq_hz":25000,"duty_unit":"percent",
+ "rpm_unit":"rpm","tach_pulses_per_rev":2}]}
+```
 
 ## 10. 设备事件(events,QoS1、非 retained)
 
@@ -202,6 +278,15 @@
 
   当前来源:`sensor`(SHT40 初始化失败,设备进入传感器故障安全态)。
   错误在 MQTT 连接前产生时先缓存,连上后补发(只保留最新一条)。
+
+- `event:"fan_stall"`(风扇堵转告警,边沿触发):
+
+  ```json
+  {"event":"fan_stall","device_id":"...","fan":0,"duty":50,"rpm":0}
+  ```
+
+  仅在状态**进入** `stall` 瞬间发布一次(持续堵转不重发);恢复后不发事件,
+  恢复情况通过风扇遥测 `status` 字段观察。
 
 **设备级 `devices/{dev}/command` 不支持**:固件不订阅该主题,向其发布无任何效果。
 命令一律通过 `devices/{dev}/sensors/{n}/command` 下发,避免命令歧义。

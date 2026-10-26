@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ctrl_logic.h" /* fan_status_t(风扇遥测状态) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -68,6 +70,35 @@ int ctrl_topic_sensor_index(const char *topic);
 
 const char *ctrl_cmd_type_str(ctrl_cmd_type_t t);
 const char *ctrl_cmd_result_str(ctrl_cmd_result_t r);
+
+/* ---- 4线 PWM 风扇协议(fans/<n>/ 主题专用载荷) ---- */
+#define CTRL_FAN_DUTY_MAX 100     /* 载荷校验:PWM 占空比上限(%) */
+#define CTRL_FAN_STALL_MS 3000    /* 风扇堵转判定:连续零转速时长(ms) */
+#define CTRL_FAN_SPINDOWN_MS 3000 /* 停机惯性宽限:duty=0 后允许余转的时长(ms) */
+
+typedef struct {
+    int fan;         /* 载荷中的风扇编号,必须与主题编号一致 */
+    uint8_t duty;    /* 目标占空比 0-100(%) */
+    char cmd_id[48]; /* 命令去重 ID */
+} ctrl_fan_cmd_t;
+
+/* Build the fan telemetry payload:
+ * {"fan":%d,"duty":%d,"rpm":%u,"status":"%s"}
+ * status 由 ctrl_fan_status_eval() 判定。返回写入字节数,非法值返回 -1。 */
+int ctrl_fan_payload_build(char *buf, size_t cap, int fan, uint8_t duty_pct, uint32_t rpm,
+                           fan_status_t status);
+
+/* Strictly parse and validate a fan command payload:
+ *  - json_len bounds the parse
+ *  - topic_fan is the fan index extracted from the MQTT topic, or -1
+ *  - required fields: fan, duty; optional: cmd_id
+ * On failure returns false and writes a short reason into err. */
+bool ctrl_fan_cmd_parse(const char *json, int json_len, int topic_fan, ctrl_fan_cmd_t *out,
+                        char *err, size_t err_cap);
+
+/* Extract the fan index from a topic of the form .../fans/<index>/... .
+ * Returns -1 when no valid index exists. */
+int ctrl_topic_fan_index(const char *topic);
 
 #ifdef __cplusplus
 }

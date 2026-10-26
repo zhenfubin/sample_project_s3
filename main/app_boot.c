@@ -22,6 +22,50 @@ typedef struct {
 
 RTC_DATA_ATTR static rtc_guard_t s_rtc; /* RTC 慢速内存,跨复位保留 */
 static boot_state_t s_state = BOOT_STATE_SAFE;
+static bool s_have_state = false;   /* 首次调用必打日志(即使停留在 BOOT_SAFE) */
+
+/* 初始化步骤总数(正常路径 11 步,末态共享第 11 步) */
+#define BOOT_STEP_TOTAL 11
+
+/* 初始化步骤号:用于串口进度显示 [n/11] */
+static int boot_state_step(boot_state_t st)
+{
+    switch (st) {
+    case BOOT_STATE_SAFE:         return 1;
+    case BOOT_STATE_INIT_NVS:     return 2;
+    case BOOT_STATE_LOAD_CONFIG:  return 3;
+    case BOOT_STATE_INIT_DRIVERS: return 4;
+    case BOOT_STATE_INIT_CONTROL: return 5;
+    case BOOT_STATE_INIT_LED:     return 6;
+    case BOOT_STATE_INIT_WIFI:    return 7;
+    case BOOT_STATE_DISCOVERY:    return 8;
+    case BOOT_STATE_INIT_MQTT:    return 9;
+    case BOOT_STATE_SYNC_STATE:   return 10;
+    default:                      return 11; /* RUNNING/DEGRADED/RECOVERY/SAFE_LOCKED */
+    }
+}
+
+/* 初始化步骤中文说明(串口日志用) */
+static const char *boot_state_cn_str(boot_state_t st)
+{
+    switch (st) {
+    case BOOT_STATE_SAFE:         return "安全输出初始化(继电器置安全电平)";
+    case BOOT_STATE_INIT_NVS:     return "NVS 与事件总线初始化";
+    case BOOT_STATE_LOAD_CONFIG:  return "加载配置";
+    case BOOT_STATE_INIT_DRIVERS: return "外设驱动初始化(SHT40)";
+    case BOOT_STATE_INIT_CONTROL: return "控制回路初始化(温控+风扇+保护)";
+    case BOOT_STATE_INIT_LED:     return "RGB 状态灯初始化";
+    case BOOT_STATE_INIT_WIFI:    return "WiFi 启动";
+    case BOOT_STATE_DISCOVERY:    return "能力发现准备";
+    case BOOT_STATE_INIT_MQTT:    return "MQTT 客户端初始化";
+    case BOOT_STATE_SYNC_STATE:   return "等待网络就绪";
+    case BOOT_STATE_RUNNING:      return "启动完成:正常运行";
+    case BOOT_STATE_DEGRADED:     return "启动完成:降级运行(无网络,本地自治)";
+    case BOOT_STATE_RECOVERY:     return "恢复模式";
+    case BOOT_STATE_SAFE_LOCKED:  return "启动完成:安全锁定(禁止加热)";
+    default:                      return "未知阶段";
+    }
+}
 
 static const char *reset_reason_str(esp_reset_reason_t r)
 {
@@ -92,9 +136,12 @@ bool boot_guard_lockout_active(void)
 
 void boot_set_state(boot_state_t st)
 {
-    if (st != s_state) {
+    if (!s_have_state || st != s_state) {
+        s_have_state = true;
         s_state = st;
-        ESP_LOGI(TAG, "boot state -> %s", boot_state_str(st));
+        /* 初始化进度串口日志:步骤号 + 中文说明(英文状态名便于检索) */
+        ESP_LOGI(TAG, "初始化进度 [%d/%d]: %s (boot state -> %s)", boot_state_step(st),
+                 BOOT_STEP_TOTAL, boot_state_cn_str(st), boot_state_str(st));
     }
 }
 

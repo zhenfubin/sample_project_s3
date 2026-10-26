@@ -55,4 +55,33 @@ menu "Application Configuration"
             64(约 25%)清晰可见又不刺眼。规范颜色保持精确开/关,
             仅整体亮度缩放。
 
+    config APP_FAN_PWM_GPIO
+        int "4-wire fan PWM control GPIO (-1 = fan disabled)"
+        range -1 48
+        default 5
+        help
+            4线 PWM 风扇的调速输入(风扇第4脚,蓝线)的 GPIO。
+            输出 25kHz PWM,占空比 0-100%。默认 GPIO5。
+            注意:ESP32-S3 GPIO 非 5V 耐受,若风扇 PWM 线内部
+            上拉至 5V,须串 1K 电阻或用 NPN/NMOS 开漏驱动。
+            设为 -1 可完全禁用风扇调速。禁止占用启动捆绑脚
+            (0/3/45/46)与 USB 脚(19/20)。
+
+    config APP_FAN_TACH_GPIO
+        int "4-wire fan tachometer input GPIO (-1 = tach disabled)"
+        range -1 48
+        default 6
+        help
+            4线 PWM 风扇的转速脉冲输入(风扇第3脚,绿线,开漏输出)
+            的 GPIO。需外部 10K 电阻上拉至 3.3V(严禁上拉至 5V)。
+            默认 GPIO6。设为 -1 可完全禁用测速(转速恒为 0)。
+
+    config APP_FAN_DEFAULT_DUTY
+        int "Fan default PWM duty percent at boot (0-100)"
+        range 0 100
+        default 0
+        help
+            上电初始风扇占空比(%),0 = 停转。该值不持久化,
+            每次上电取此配置值。
+
 endmenu
