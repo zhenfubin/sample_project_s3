@@ -24,8 +24,8 @@ void ctrl_set_defaults(ctrl_params_t *p)
     p->max_c = CTRL_LIMIT_MAX_C;
     p->sample_period_ms = 2000;
     p->sensor_stale_ms = 8000;
-    p->manual_max_ms = 2 * 60 * 60 * 1000;
-    p->heat_max_ms = 2 * 60 * 60 * 1000;
+    p->manual_max_ms = 3 * 60 * 60 * 1000;
+    p->heat_max_ms = 3 * 60 * 60 * 1000;
     p->cooldown_ms = 30 * 1000;
     p->timeout_retry_ms = 10 * 60 * 1000;
     p->safe_lock_ms = 30 * 60 * 1000;
